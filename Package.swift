@@ -17,16 +17,29 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Pre-1.0 dependency: pin to the `0.1.x` patch range so a
+        // future `0.2.0` does not auto-resolve through SwiftPM's
+        // `from:` (up-to-next-major) semantics.
+        .package(
+            url: "https://github.com/swift-loggers/swift-logger-persistence.git",
+            .upToNextMinor(from: "0.1.0")
+        ),
         .package(url: "https://github.com/apple/swift-docc-plugin.git", from: "1.0.0")
     ],
     targets: [
         .target(
-            name: "LoggerRemote"
+            name: "LoggerRemote",
+            dependencies: [
+                .product(name: "LoggerPersistence", package: "swift-logger-persistence"),
+                .product(name: "LoggerFilePersistence", package: "swift-logger-persistence")
+            ]
         ),
         .testTarget(
             name: "LoggerRemoteTests",
             dependencies: [
-                "LoggerRemote"
+                "LoggerRemote",
+                .product(name: "LoggerPersistence", package: "swift-logger-persistence"),
+                .product(name: "LoggerFilePersistence", package: "swift-logger-persistence")
             ],
             exclude: [
                 "CoverageMap.md"

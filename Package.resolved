@@ -1,5 +1,5 @@
 {
-  "originHash" : "25fdaf01d3680998dd1feaa5fbaafc7895956489cf6341cabc7fa7be88358b7e",
+  "originHash" : "3baf630b6bf85fa3b214b6e96db3cfad269343c41e9070a2deaa4b073c09db9f",
   "pins" : [
     {
       "identity" : "swift-docc-plugin",
@@ -17,6 +17,24 @@
       "state" : {
         "revision" : "b45d1f2ed151d057b54504d653e0da5552844e34",
         "version" : "1.0.0"
+      }
+    },
+    {
+      "identity" : "swift-logger",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swift-loggers/swift-logger.git",
+      "state" : {
+        "revision" : "75d2b51e15b69e7488b5cc6cb21278ebf3bde12b",
+        "version" : "0.1.0"
+      }
+    },
+    {
+      "identity" : "swift-logger-persistence",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swift-loggers/swift-logger-persistence.git",
+      "state" : {
+        "revision" : "62bd6d51dc18ebd697601c4c863928a665769016",
+        "version" : "0.1.0"
       }
     }
   ],
