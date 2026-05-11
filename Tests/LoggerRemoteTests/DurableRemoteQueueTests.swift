@@ -45,25 +45,7 @@ extension DurableRemoteQueueTests {
         defer { Self.cleanup(destination.parent) }
         _ = try await queue.drain(to: destination.url)
         let bytes = try Data(contentsOf: destination.url)
-        let firstLineBytes = Data(bytes.prefix { $0 != 0x0A })
-        let envelope = try #require(
-            try JSONSerialization.jsonObject(
-                with: firstLineBytes
-            ) as? [String: Any]
-        )
-        let payloadBase64 = try #require(envelope["payload"] as? String)
-        let recordBytes = try #require(Data(base64Encoded: payloadBase64))
-        let recordObject = try #require(
-            try JSONSerialization.jsonObject(with: recordBytes) as? [String: Any]
-        )
-        let formatVersion = try #require(recordObject["formatVersion"] as? Int)
-        #expect(formatVersion == Int(DurableRemoteQueueRecord.currentFormatVersion))
-        // Decoding through the typed record path must also see the
-        // current version so a future schema bump that forgets to
-        // populate the field surfaces here.
-        let decoded = try JSONDecoder().decode(
-            DurableRemoteQueueRecord.self, from: recordBytes
-        )
+        let decoded = try Self.decodeFirstRecord(in: bytes)
         #expect(decoded.formatVersion == DurableRemoteQueueRecord.currentFormatVersion)
     }
 }
@@ -100,8 +82,8 @@ extension DurableRemoteQueueTests {
         )
 
         // The next enqueue runs against the cleared seam. The
-        // persisted envelope must spell `"sequence":1`, proving
-        // the failed encode never advanced the allocator past its
+        // persisted envelope must spell sequence `1`, proving the
+        // failed encode never advanced the allocator past its
         // reserved value.
         try await queue.enqueue(RemoteDeliveryEntry(
             identifier: 9, payload: Data([0x02])
@@ -112,9 +94,8 @@ extension DurableRemoteQueueTests {
         defer { Self.cleanup(destination.parent) }
         _ = try await queue.drain(to: destination.url)
         let bytes = try Data(contentsOf: destination.url)
-        let line = try #require(String(bytes: bytes, encoding: .utf8))
-        #expect(line.contains("\"sequence\":1"))
-        #expect(!line.contains("\"sequence\":2"))
+        let sequences = try Self.decodePersistenceSequences(in: bytes)
+        #expect(sequences == [1])
     }
 }
 
@@ -125,11 +106,12 @@ extension DurableRemoteQueueTests {
     func allocatorExhaustionRejectsNextEnqueue() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
-        // Seed the queue's allocator at UInt64.max so the very next
-        // enqueue admission tips it over without an `&+=` wrap to 0.
+        // Seed the queue's allocator at UInt64.max so the first
+        // enqueue is admitted with the largest valid sequence; the
+        // post-admission allocator advance then wraps to 0 for the
+        // next reservation guard.
         let queue = DurableRemoteQueue(
             directory: directory,
-            contentType: "application/vnd.swift-loggers.remote-queue+json",
             rotation: .never,
             startingSequence: UInt64.max
         )
@@ -146,6 +128,16 @@ extension DurableRemoteQueueTests {
         } catch {
             #expect(error == .sequenceExhausted)
         }
+        // Confirm the admitted record carries the full `UInt64.max`
+        // sequence on the wire — not a silently downgraded value —
+        // by draining the queue and decoding the byte-stable export.
+        try await queue.flush()
+        let destination = try Self.makeExportURL()
+        defer { Self.cleanup(destination.parent) }
+        _ = try await queue.drain(to: destination.url)
+        let bytes = try Data(contentsOf: destination.url)
+        let sequences = try Self.decodePersistenceSequences(in: bytes)
+        #expect(sequences == [UInt64.max])
     }
 }
 
@@ -224,15 +216,10 @@ extension DurableRemoteQueueTests {
         defer { Self.cleanup(destination.parent) }
         _ = try await queue.drain(to: destination.url)
         let bytes = try Data(contentsOf: destination.url)
-        let line = try #require(String(bytes: bytes, encoding: .utf8))
-        // The persistence envelope spells `"sequence":N` verbatim;
-        // the queue must spell 1, 2, 3 across the three entries.
-        #expect(line.contains("\"sequence\":1"))
-        #expect(line.contains("\"sequence\":2"))
-        #expect(line.contains("\"sequence\":3"))
-        // The producer-supplied 999 / 42 / 7 must NOT appear as a
-        // persistence sequence value.
-        #expect(!line.contains("\"sequence\":999"))
+        // The queue must assign `[1, 2, 3]` regardless of the
+        // producer-supplied `999`, `42`, `7` identifiers.
+        let sequences = try Self.decodePersistenceSequences(in: bytes)
+        #expect(sequences == [1, 2, 3])
     }
 }
 
@@ -569,14 +556,15 @@ extension DurableRemoteQueueTests {
     /// (which is not part of the persistence 0.1.x surface).
     ///
     /// The line is sliced at the first `0x0A` byte rather than via
-    /// `String.split(separator:)` so an empty leading line, a
-    /// trailing-only `\n`, or any non-UTF-8 byte inside a later
-    /// line cannot influence the first-line slice. Only the first
-    /// line is required to be UTF-8 JSON.
+    /// `String.split(separator:)` so any non-UTF-8 byte inside a
+    /// later line cannot influence the first-line slice. Only the
+    /// first line is required to be UTF-8 JSON, and that line MUST
+    /// be LF-terminated — an unterminated buffer fails the test
+    /// rather than being treated as a valid first-line slice.
     private static func decodeFirstRecord(
         in exportBytes: Data
     ) throws -> DurableRemoteQueueRecord {
-        let lineEnd = exportBytes.firstIndex(of: 0x0A) ?? exportBytes.endIndex
+        let lineEnd = try #require(exportBytes.firstIndex(of: 0x0A))
         let firstLineBytes = Data(exportBytes[..<lineEnd])
         let envelope = try #require(
             try JSONSerialization.jsonObject(with: firstLineBytes) as? [String: Any]
@@ -586,5 +574,47 @@ extension DurableRemoteQueueTests {
         return try JSONDecoder().decode(
             DurableRemoteQueueRecord.self, from: payloadBytes
         )
+    }
+
+    /// Returns the top-level persistence-envelope `sequence` value
+    /// for every NDJSON line in `exportBytes`, in line order.
+    /// Lets tests assert the queue's private sequence allocator
+    /// values without falling back to substring matching against
+    /// the canonical envelope text.
+    ///
+    /// Framing matches the byte-stable export contract the queue
+    /// owns: every non-empty line MUST end with `0x0A`, a missing
+    /// trailing LF on the last line fails the test, and an empty
+    /// line (consecutive `0x0A`s or a leading `0x0A`) fails the
+    /// test rather than being skipped.
+    ///
+    /// `sequence` is decoded through a minimal `Decodable` envelope
+    /// so the full `UInt64` allocator range — including `UInt64.max`
+    /// — round-trips losslessly. A negative, non-integer, or
+    /// out-of-`UInt64`-range value fails the test through the
+    /// decoder rather than being silently coerced.
+    static func decodePersistenceSequences(
+        in exportBytes: Data
+    ) throws -> [UInt64] {
+        let decoder = JSONDecoder()
+        var cursor = exportBytes.startIndex
+        var sequences: [UInt64] = []
+        while cursor < exportBytes.endIndex {
+            let lineEnd = try #require(
+                exportBytes[cursor...].firstIndex(of: 0x0A)
+            )
+            let lineBytes = Data(exportBytes[cursor ..< lineEnd])
+            cursor = exportBytes.index(after: lineEnd)
+            try #require(!lineBytes.isEmpty)
+            let envelope = try decoder.decode(
+                PersistenceSequenceEnvelope.self, from: lineBytes
+            )
+            sequences.append(envelope.sequence)
+        }
+        return sequences
+    }
+
+    private struct PersistenceSequenceEnvelope: Decodable {
+        let sequence: UInt64
     }
 }

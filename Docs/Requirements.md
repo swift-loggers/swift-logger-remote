@@ -15,7 +15,7 @@ status is tracked by the roadmap and coverage documents.
 | LGR-3 | Retry policy exposes a retry limit and a backoff schedule model; the engine does not own the timer or scheduler. | M3.4 |
 | LGR-4 | Batch policy exposes a max entry count and a max byte count and produces deterministic boundary behavior. | M3.4 |
 | LGR-5 | Transport surface accepts payload bytes plus metadata and returns response bytes plus sink-owned response metadata without imposing HTTP semantics on the core contract; transport is sink-neutral and does not expose HTTP status as a core response field. | M3.4 |
-| LGR-6 | Flush lifecycle vocabulary is defined together with the engine loop; the lifecycle-observer surface remains deferred until the engine loop contract ships. | Deferred (Future M3.4 milestone) |
+| LGR-6 | Flush lifecycle vocabulary is deferred until the engine loop contract ships; the lifecycle-observer surface remains deferred until the same boundary. | Deferred (Future M3.4 milestone) |
 | LGR-7 | Delivery error surface is a typed sink-neutral diagnostic enum suitable for adapter classification; HTTP / vendor body codes stay inside adapter classifiers. | M3.4 |
 
 ## Sink Neutrality
@@ -29,7 +29,7 @@ status is tracked by the roadmap and coverage documents.
 
 | ID | Requirement | Target |
 | --- | --- | --- |
-| LGR-10 | Accepted ordering is owned by `swift-logger-persistence` through its byte-stable export contract; the engine reads accepted-line bytes through the persistence surface, not through ad-hoc storage. | M3.4 |
+| LGR-10 | Accepted ordering is owned by `swift-logger-persistence` through its byte-stable export contract; the engine reads accepted bytes through the persistence surface, not through ad-hoc storage. | M3.4 |
 | LGR-11 | Delivery acknowledgement is the only trigger for destructive removal of accepted bytes from the persistence layer. | M3.4 |
 
 ## Notes
@@ -60,9 +60,26 @@ status is tracked by the roadmap and coverage documents.
   outstanding batch for retry. `byteCount` on the returned batch is
   the exact post-export file size; unmeasurable batches surface as a
   typed drain failure without acknowledgement state advancement.
-- **Deferred — batching engine (PR 3/N).** Deterministic batch
-  construction, entry/byte caps, and oversized-entry behavior land
-  in the next PR with test-only fixtures and no transport dispatch.
+- **Batching engine (PR 3/N).** `BatchEngine` is engine-internal
+  machinery the future delivery loop drives. `recoverEntries(from:)`
+  parses a drained queue export back into an ordered array of
+  `RemoteDeliveryEntry` values; the parser validates each line's
+  envelope `contentType` against the queue-owned constant
+  (`DurableRemoteQueue.envelopeContentType`) before treating its
+  `payload` as queue-record bytes, then validates each queue
+  record's `formatVersion` schema-evolution anchor fail-closed
+  before decoding any other queue-record field.
+  `makeBatches(from:policy:)` splits the entry stream into ordered
+  batches under `RemoteBatchPolicy`: equal-to-cap fits in the
+  current batch, strictly-greater starts the next, and an
+  oversized single entry surfaces
+  `.batchSizeExceeded(limit:actual:)`. Accepted ordering from the
+  byte-stable queue export and duplicate-identifier multiplicity
+  survive both steps verbatim. The engine never dedupes, sorts, or classifies; it
+  never invokes `DurableRemoteQueue.acknowledge()` and performs
+  no destructive removal. LGR-4 owns the batch-policy boundary
+  contract this engine consumes; LGR-10 / LGR-11 hold across the
+  batching path.
 - **Deferred — retry scheduler (PR 4/N).** Retry policy execution,
   backoff progression, attempt accounting, and terminal vs.
   retryable routing land after batching. The PR carries a test-only
