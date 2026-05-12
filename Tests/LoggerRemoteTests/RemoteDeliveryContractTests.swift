@@ -10,7 +10,10 @@ struct RemoteDeliveryContractTests {}
 // MARK: - Sendable conformance
 
 extension RemoteDeliveryContractTests {
-    @Test("Contract value types are Sendable")
+    @Test(
+        "Contract value types are Sendable",
+        .tags(.lgr1, .lgr2, .lgr3, .lgr4, .lgr5, .lgr7)
+    )
     func contractValueTypesAreSendable() {
         let entry: any Sendable = RemoteDeliveryEntry(
             identifier: 1, payload: Data([0x01])
@@ -40,7 +43,10 @@ extension RemoteDeliveryContractTests {
 // MARK: - RemoteRetryPolicy validation
 
 extension RemoteDeliveryContractTests {
-    @Test("`RemoteRetryPolicy.make` rejects a zero attempt count")
+    @Test(
+        "`RemoteRetryPolicy.make` rejects a zero attempt count",
+        .tags(.lgr3, .lgr7)
+    )
     func retryPolicyRejectsZeroAttempts() {
         do {
             _ = try RemoteRetryPolicy.make(
@@ -53,7 +59,8 @@ extension RemoteDeliveryContractTests {
     }
 
     @Test(
-        "`RemoteRetryPolicy.make` rejects maxAttempts above maxSupportedAttempts"
+        "`RemoteRetryPolicy.make` rejects maxAttempts above maxSupportedAttempts",
+        .tags(.lgr3, .lgr7)
     )
     func retryPolicyRejectsAttemptsAboveSupported() {
         do {
@@ -69,7 +76,10 @@ extension RemoteDeliveryContractTests {
         }
     }
 
-    @Test("`RemoteRetryPolicy.make` rejects a non-positive constant backoff")
+    @Test(
+        "`RemoteRetryPolicy.make` rejects a non-positive constant backoff",
+        .tags(.lgr3, .lgr7)
+    )
     func retryPolicyRejectsNonPositiveConstantBackoff() {
         do {
             _ = try RemoteRetryPolicy.make(
@@ -82,7 +92,8 @@ extension RemoteDeliveryContractTests {
     }
 
     @Test(
-        "`RemoteRetryPolicy.make` rejects constant backoff above maxBackoffSeconds"
+        "`RemoteRetryPolicy.make` rejects constant backoff above maxBackoffSeconds",
+        .tags(.lgr3, .lgr7)
     )
     func retryPolicyRejectsConstantBackoffAboveBound() {
         do {
@@ -98,7 +109,10 @@ extension RemoteDeliveryContractTests {
         }
     }
 
-    @Test("`RemoteRetryPolicy.make` rejects exponential multiplier == 1")
+    @Test(
+        "`RemoteRetryPolicy.make` rejects exponential multiplier == 1",
+        .tags(.lgr3, .lgr7)
+    )
     func retryPolicyRejectsExponentialMultiplierEqualOne() {
         do {
             _ = try RemoteRetryPolicy.make(
@@ -116,7 +130,8 @@ extension RemoteDeliveryContractTests {
     }
 
     @Test(
-        "`RemoteRetryPolicy.make` rejects exponential cap below initial seconds"
+        "`RemoteRetryPolicy.make` rejects exponential cap below initial seconds",
+        .tags(.lgr3, .lgr7)
     )
     func retryPolicyRejectsExponentialCapBelowInitial() {
         do {
@@ -133,7 +148,8 @@ extension RemoteDeliveryContractTests {
     }
 
     @Test(
-        "`RemoteRetryPolicy.make` rejects exponential cap above maxBackoffSeconds"
+        "`RemoteRetryPolicy.make` rejects exponential cap above maxBackoffSeconds",
+        .tags(.lgr3, .lgr7)
     )
     func retryPolicyRejectsExponentialCapAboveBound() {
         do {
@@ -153,7 +169,10 @@ extension RemoteDeliveryContractTests {
         }
     }
 
-    @Test("`RemoteRetryPolicy.make` accepts a well-formed exponential schedule")
+    @Test(
+        "`RemoteRetryPolicy.make` accepts a well-formed exponential schedule",
+        .tags(.lgr3)
+    )
     func retryPolicyAcceptsWellFormedExponential() throws {
         let policy = try RemoteRetryPolicy.make(
             maxAttempts: 3,
@@ -171,7 +190,10 @@ extension RemoteDeliveryContractTests {
 // MARK: - RemoteRetryPolicy delayBeforeRetry
 
 extension RemoteDeliveryContractTests {
-    @Test("`delayBeforeRetry` constant: every valid attempt returns the same seconds")
+    @Test(
+        "`delayBeforeRetry` constant: every valid attempt returns the same seconds",
+        .tags(.lgr3)
+    )
     func delayBeforeRetryConstantReturnsSameSeconds() throws {
         let policy = try RemoteRetryPolicy.make(
             maxAttempts: 4, backoff: .constant(seconds: 2.5)
@@ -181,7 +203,10 @@ extension RemoteDeliveryContractTests {
         }
     }
 
-    @Test("`delayBeforeRetry` exponential: attempts progress as initial * multiplier^(n - 1)")
+    @Test(
+        "`delayBeforeRetry` exponential: attempts progress as initial * multiplier^(n - 1)",
+        .tags(.lgr3)
+    )
     func delayBeforeRetryExponentialProgression() throws {
         let policy = try RemoteRetryPolicy.make(
             maxAttempts: 5,
@@ -195,7 +220,10 @@ extension RemoteDeliveryContractTests {
         #expect(try policy.delayBeforeRetry(attempt: 4) == 8)
     }
 
-    @Test("`delayBeforeRetry` exponential: clamps at capSeconds when raw exceeds cap")
+    @Test(
+        "`delayBeforeRetry` exponential: clamps at capSeconds when raw exceeds cap",
+        .tags(.lgr3)
+    )
     func delayBeforeRetryExponentialClampsAtCap() throws {
         let policy = try RemoteRetryPolicy.make(
             maxAttempts: 50,
@@ -212,7 +240,10 @@ extension RemoteDeliveryContractTests {
         #expect(try policy.delayBeforeRetry(attempt: 49) == 16)
     }
 
-    @Test("`delayBeforeRetry` rejects an attempt outside `1 ..< maxAttempts`")
+    @Test(
+        "`delayBeforeRetry` rejects an attempt outside `1 ..< maxAttempts`",
+        .tags(.lgr3, .lgr7)
+    )
     func delayBeforeRetryRejectsInvalidAttempt() throws {
         let policy = try RemoteRetryPolicy.make(
             maxAttempts: 3, backoff: .constant(seconds: 1)
@@ -244,7 +275,10 @@ extension RemoteDeliveryContractTests {
 // MARK: - RemoteBatchPolicy boundary behavior
 
 extension RemoteDeliveryContractTests {
-    @Test("`RemoteBatchPolicy.make` rejects zero entry cap")
+    @Test(
+        "`RemoteBatchPolicy.make` rejects zero entry cap",
+        .tags(.lgr4, .lgr7)
+    )
     func batchPolicyRejectsZeroEntryCap() {
         do {
             _ = try RemoteBatchPolicy.make(maxEntryCount: 0, maxByteCount: 1)
@@ -254,7 +288,10 @@ extension RemoteDeliveryContractTests {
         }
     }
 
-    @Test("`RemoteBatchPolicy.make` rejects zero byte cap")
+    @Test(
+        "`RemoteBatchPolicy.make` rejects zero byte cap",
+        .tags(.lgr4, .lgr7)
+    )
     func batchPolicyRejectsZeroByteCap() {
         do {
             _ = try RemoteBatchPolicy.make(maxEntryCount: 1, maxByteCount: 0)
@@ -264,7 +301,10 @@ extension RemoteDeliveryContractTests {
         }
     }
 
-    @Test("Batch boundary: equal-to-cap fits, strictly-greater fires")
+    @Test(
+        "Batch boundary: equal-to-cap fits, strictly-greater fires",
+        .tags(.lgr4)
+    )
     func batchBoundaryEqualToCapFits() throws {
         let policy = try RemoteBatchPolicy.make(
             maxEntryCount: 4, maxByteCount: 100
@@ -287,7 +327,10 @@ extension RemoteDeliveryContractTests {
         ) == true)
     }
 
-    @Test("Batch boundary: pathological byte-count overflow fires the boundary")
+    @Test(
+        "Batch boundary: pathological byte-count overflow fires the boundary",
+        .tags(.lgr4)
+    )
     func batchBoundaryByteOverflowFires() throws {
         let policy = try RemoteBatchPolicy.make(
             maxEntryCount: .max, maxByteCount: .max
@@ -302,7 +345,10 @@ extension RemoteDeliveryContractTests {
         ) == true)
     }
 
-    @Test("Batch boundary: entry-count overflow fires the boundary")
+    @Test(
+        "Batch boundary: entry-count overflow fires the boundary",
+        .tags(.lgr4)
+    )
     func batchBoundaryEntryCountOverflowFires() throws {
         let policy = try RemoteBatchPolicy.make(
             maxEntryCount: .max, maxByteCount: .max
@@ -316,7 +362,10 @@ extension RemoteDeliveryContractTests {
         ) == true)
     }
 
-    @Test("Batch boundary: negative inputs surface .invalidBatchState")
+    @Test(
+        "Batch boundary: negative inputs surface .invalidBatchState",
+        .tags(.lgr4, .lgr7)
+    )
     func batchBoundaryNegativeInputsRejected() throws {
         let policy = try RemoteBatchPolicy.make(
             maxEntryCount: 4, maxByteCount: 100
@@ -342,7 +391,8 @@ extension RemoteDeliveryContractTests {
     }
 
     @Test(
-        "Batch boundary: current state already beyond policy surfaces .invalidBatchState"
+        "Batch boundary: current state already beyond policy surfaces .invalidBatchState",
+        .tags(.lgr4, .lgr7)
     )
     func batchBoundaryCurrentBeyondPolicyRejected() throws {
         let policy = try RemoteBatchPolicy.make(
@@ -373,7 +423,8 @@ extension RemoteDeliveryContractTests {
     }
 
     @Test(
-        "Batch boundary: oversized single entry rejected as .batchSizeExceeded"
+        "Batch boundary: oversized single entry rejected as .batchSizeExceeded",
+        .tags(.lgr4, .lgr7)
     )
     func batchBoundaryOversizedSingleEntryRejected() throws {
         let policy = try RemoteBatchPolicy.make(
@@ -397,7 +448,10 @@ extension RemoteDeliveryContractTests {
 // MARK: - RemoteDeliveryEntry identifier semantics
 
 extension RemoteDeliveryContractTests {
-    @Test("Delivery entry identifier is correlation identity only, no ordering")
+    @Test(
+        "Delivery entry identifier is correlation identity only, no ordering",
+        .tags(.lgr1)
+    )
     func deliveryEntryIdentifierParticipatesInEqualityButCarriesNoOrdering() {
         let payload = Data([0x01, 0x02])
         let metadata = ["sink": "elastic"]
@@ -418,7 +472,10 @@ extension RemoteDeliveryContractTests {
 // MARK: - RemoteTransportResponse preservation
 
 extension RemoteDeliveryContractTests {
-    @Test("Transport response preserves opaque bytes and metadata")
+    @Test(
+        "Transport response preserves opaque bytes and metadata",
+        .tags(.lgr5)
+    )
     func transportResponsePreservesOpaqueBytesAndMetadata() {
         let bytes = Data([0x7B, 0x7D])
         let response = RemoteTransportResponse(

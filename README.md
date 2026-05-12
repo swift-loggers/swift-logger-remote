@@ -11,18 +11,24 @@ at the released `0.1.x` SemVer line via
 export from the persistence layer exclusively through
 ``DurableRemoteQueue``. Destructive removal of accepted bytes from
 the persistence layer runs only after the engine acknowledges a
-drained batch (LGR-11).
+successfully drained batch (LGR-11).
 
 ## Status
 
-Pre-1.0 scaffold for the durable remote-delivery contract layer.
-Current scope is the contract value types, a persistence-backed
-``DurableRemoteQueue`` core, and engine-internal ``BatchEngine``
-machinery that recovers entries from a drained queue export and
-splits them into deterministic batches under ``RemoteBatchPolicy``.
-Retry scheduler, real ``RemoteTransport`` dispatch, flush /
-lifecycle integration, vendor adapters, and tagged releases ship
-in later milestones.
+Pre-release durable remote-delivery engine package. The core
+contract surfaces are locked, the persistence-backed
+``DurableRemoteQueue`` core is in place, engine-internal
+``BatchEngine`` machinery recovers entries from a drained queue
+export and splits them into deterministic batches under
+``RemoteBatchPolicy``, and an engine-internal retry / execution
+loop (``RetryExecutor`` / ``ExecutionLoop``) drives the per-entry
+retry budget over the queue + batching + transport primitives
+under ``RemoteRetryPolicy`` without performing the destructive
+acknowledgement-to-removal lifecycle yet. Production
+``RemoteTransport`` adapter integration, flush and lifecycle
+integration, the
+acknowledgement-to-removal lifecycle closure, vendor adapters, and
+tagged releases ship in later milestones.
 
 ## Queue envelope contract
 
@@ -39,8 +45,12 @@ first release.
 
 ## Non-goals
 
-- No retry scheduler and no real ``RemoteTransport`` dispatch in
-  the core engine yet (no timer, no network, no in-flight queue).
+- No production transport integration yet. The engine-internal
+  retry / execution loop exists and dispatches through the
+  ``RemoteTransport`` abstraction, but this milestone exercises it
+  through a test-only ``StubRemoteTransport`` fixture (not a
+  production adapter); production adapter and network integration
+  lands in a later PR.
 - No vendor-specific encoders, request builders, or response
   validators in the core engine — those live in adapter packages.
 - No Datadog/Splunk/Loki/Dynatrace adapter packages here.

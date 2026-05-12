@@ -31,7 +31,10 @@ struct DurableRemoteQueueTests {
 // MARK: - On-disk schema version
 
 extension DurableRemoteQueueTests {
-    @Test("persisted record carries the current format version")
+    @Test(
+        "persisted record carries the current format version",
+        .tags(.lgr10)
+    )
     func recordCarriesFormatVersion() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -53,7 +56,10 @@ extension DurableRemoteQueueTests {
 // MARK: - Encode failure does not advance the sequence allocator
 
 extension DurableRemoteQueueTests {
-    @Test("recordEncodingFailed leaves the private sequence allocator at the reserved value")
+    @Test(
+        "recordEncodingFailed leaves the private sequence allocator at the reserved value",
+        .tags(.lgr10)
+    )
     func recordEncodingFailureDoesNotAdvanceAllocator() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -102,7 +108,10 @@ extension DurableRemoteQueueTests {
 // MARK: - Sequence allocator exhaustion
 
 extension DurableRemoteQueueTests {
-    @Test("allocator exhaustion surfaces .sequenceExhausted and rejects the next enqueue")
+    @Test(
+        "allocator exhaustion surfaces .sequenceExhausted and rejects the next enqueue",
+        .tags(.lgr10)
+    )
     func allocatorExhaustionRejectsNextEnqueue() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -144,7 +153,10 @@ extension DurableRemoteQueueTests {
 // MARK: - Lossless record persistence
 
 extension DurableRemoteQueueTests {
-    @Test("enqueue accepts an entry with metadata and a zero identifier")
+    @Test(
+        "enqueue accepts an entry with metadata and a zero identifier",
+        .tags(.lgr1, .lgr10)
+    )
     func enqueueAcceptsMetadataAndZeroIdentifier() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -160,7 +172,10 @@ extension DurableRemoteQueueTests {
         // and metadata round-trips through the internal record.
     }
 
-    @Test("enqueue persists identifier, payload, and metadata losslessly")
+    @Test(
+        "enqueue persists identifier, payload, and metadata losslessly",
+        .tags(.lgr1, .lgr10)
+    )
     func enqueuePersistsRecordLosslessly() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -193,7 +208,10 @@ extension DurableRemoteQueueTests {
 // MARK: - Sequence allocator
 
 extension DurableRemoteQueueTests {
-    @Test("queue assigns its own private sequence; entry identifier carries no ordering")
+    @Test(
+        "queue assigns its own private sequence; entry identifier carries no ordering",
+        .tags(.lgr1, .lgr10)
+    )
     func queueAssignsPrivateSequence() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -226,7 +244,10 @@ extension DurableRemoteQueueTests {
 // MARK: - Single-outstanding-batch state
 
 extension DurableRemoteQueueTests {
-    @Test("drain before acknowledge surfaces .batchAlreadyOutstanding")
+    @Test(
+        "drain before acknowledge surfaces .batchAlreadyOutstanding",
+        .tags(.lgr11)
+    )
     func drainBeforeAcknowledgeSurfacesBatchAlreadyOutstanding() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -249,7 +270,10 @@ extension DurableRemoteQueueTests {
         }
     }
 
-    @Test("acknowledge clears outstanding batch and re-opens drain")
+    @Test(
+        "acknowledge clears outstanding batch and re-opens drain",
+        .tags(.lgr11)
+    )
     func acknowledgeReopensDrain() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -274,7 +298,10 @@ extension DurableRemoteQueueTests {
         #expect(second.byteCount == 0)
     }
 
-    @Test("failed acknowledge keeps the outstanding batch for retry")
+    @Test(
+        "failed acknowledge keeps the outstanding batch for retry",
+        .tags(.lgr11)
+    )
     func failedAcknowledgeKeepsOutstandingBatch() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -320,7 +347,10 @@ extension DurableRemoteQueueTests {
         }
     }
 
-    @Test("acknowledge without a captured boundary surfaces .acknowledgeFailed")
+    @Test(
+        "acknowledge without a captured boundary surfaces .acknowledgeFailed",
+        .tags(.lgr11)
+    )
     func acknowledgeWithoutBoundaryFails() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -352,7 +382,10 @@ extension DurableRemoteQueueTests {
     // assertion, and the recovery-drain record-identity decode in
     // one body so the contract reads top-to-bottom.
 
-    @Test("drain size-read failure leaves no outstanding batch and blocks destructive remove")
+    @Test(
+        "drain size-read failure leaves no outstanding batch and blocks destructive remove",
+        .tags(.lgr10, .lgr11)
+    )
     func drainSizeReadFailureBlocksDestructiveRemove() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -479,7 +512,10 @@ extension DurableRemoteQueueTests {
 // MARK: - Drain byte-count exactness
 
 extension DurableRemoteQueueTests {
-    @Test("drain reports the exact post-export byte count")
+    @Test(
+        "drain reports the exact post-export byte count",
+        .tags(.lgr10)
+    )
     func drainReportsExactByteCount() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
