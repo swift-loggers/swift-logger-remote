@@ -1,7 +1,7 @@
 import Foundation
 
-/// Engine-internal batching machinery used by the future delivery
-/// loop.
+/// Engine-internal batching machinery driven by the engine-
+/// internal ``ExecutionLoop`` and ``RemoteEngine/flush()``.
 ///
 /// Two pure steps:
 ///
@@ -74,8 +74,9 @@ internal enum BatchEngine {
     }
 
     /// Same parser as ``recoverEntries(from:)`` but reading export
-    /// bytes directly. Exposed so a future delivery loop can run
-    /// the parser against an in-memory buffer; internal-only.
+    /// bytes directly. Exposed so the engine-internal
+    /// ``ExecutionLoop`` and ``RemoteEngine`` can run the parser
+    /// against an in-memory buffer; internal-only.
     ///
     /// Framing rules (byte-stable LF-delimited NDJSON):
     ///
@@ -119,15 +120,33 @@ internal enum BatchEngine {
         from entries: [RemoteDeliveryEntry],
         policy: RemoteBatchPolicy
     ) throws(RemoteDeliveryError) -> [[RemoteDeliveryEntry]] {
+        try makeBatches(
+            from: entries,
+            boundaryExceeded: policy.wouldExceed
+        )
+    }
+
+    /// Engine-internal batching loop parameterized by the boundary
+    /// decision so the test target can exercise the empty-`current`
+    /// invariant guard without weakening
+    /// ``RemoteBatchPolicy/wouldExceed(currentEntryCount:currentByteCount:nextEntryByteCount:)``.
+    /// Production callers always reach this through
+    /// ``makeBatches(from:policy:)``; the boundary closure overload
+    /// exists so test code can inject a deterministic
+    /// `wouldExceed`-shaped decision (e.g. one that returns `true`
+    /// over an empty running batch) and assert the batcher refuses
+    /// fail-closed.
+    internal static func makeBatches(
+        from entries: [RemoteDeliveryEntry],
+        boundaryExceeded: (Int, Int, Int) throws(RemoteDeliveryError) -> Bool
+    ) throws(RemoteDeliveryError) -> [[RemoteDeliveryEntry]] {
         var batches: [[RemoteDeliveryEntry]] = []
         var current: [RemoteDeliveryEntry] = []
         var currentByteCount = 0
         for entry in entries {
             let nextSize = entry.payload.count
-            let exceeded = try policy.wouldExceed(
-                currentEntryCount: current.count,
-                currentByteCount: currentByteCount,
-                nextEntryByteCount: nextSize
+            let exceeded = try boundaryExceeded(
+                current.count, currentByteCount, nextSize
             )
             if exceeded {
                 // The boundary helper already throws
@@ -135,19 +154,28 @@ internal enum BatchEngine {
                 // alone exceed the cap. Reaching this branch means
                 // the cap fits the entry but not on top of the
                 // running batch, so we close `current` and start a
-                // fresh batch with this entry.
+                // fresh batch with this entry. A boundary
+                // `exceeded == true` over an empty `current` would
+                // emit an empty batch — an engine-side invariant
+                // violation forbidden by the batching contract —
+                // so the batcher refuses fail-closed rather than
+                // relying on the helper's first-entry contract.
+                guard !current.isEmpty else {
+                    throw .invalidBatchState
+                }
                 batches.append(current)
                 current = [entry]
                 currentByteCount = nextSize
             } else {
-                // `wouldExceed == false` already proves the sum
-                // fits both the byte cap and Swift's `Int` range,
-                // but the queue update path keeps an overflow-safe
-                // add so a future change to the boundary helper
-                // cannot silently trap or wrap here. An overflow
-                // that nonetheless slips through surfaces as
-                // `.invalidBatchState` — an engine-side invariant
-                // violation, not a caller-actionable failure.
+                // `boundaryExceeded == false` already proves the
+                // sum fits both the byte cap and Swift's `Int`
+                // range, but the queue update path keeps an
+                // overflow-safe add so a future change to the
+                // boundary helper cannot silently trap or wrap
+                // here. An overflow that nonetheless slips through
+                // surfaces as `.invalidBatchState` — an
+                // engine-side invariant violation, not a
+                // caller-actionable failure.
                 let (updatedByteCount, overflow) =
                     currentByteCount.addingReportingOverflow(nextSize)
                 guard !overflow else {

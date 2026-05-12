@@ -1,7 +1,9 @@
 /// Retry policy for remote delivery attempts.
 ///
-/// M3.4 currently exposes the policy model only. Retry scheduling
-/// belongs to the future engine loop.
+/// The policy is the public contract model — locked attempt-count
+/// bounds, locked backoff schedule. Runtime execution is driven
+/// by the engine-internal `RetryExecutor` / `ExecutionLoop`
+/// and surfaced through ``RemoteEngine/flush()``.
 public struct RemoteRetryPolicy: Sendable, Equatable {
     /// Upper bound on `maxAttempts`. Attempt counts above this are
     /// rejected at construction time.

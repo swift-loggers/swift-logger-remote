@@ -79,6 +79,16 @@ extension ExecutionLoopTests {
             maxAttempts: maxAttempts, backoff: .constant(seconds: seconds)
         )
     }
+
+    /// Builds a `StubRemoteTransport` with the shared
+    /// ``metadataClassifier`` already wired up. The execution-loop
+    /// suite uses this everywhere; per-test custom classifiers are
+    /// not needed for the integration cases this file covers.
+    static func makeStubTransport(
+        outcomes: [StubTransportOutcome]
+    ) -> StubRemoteTransport {
+        StubRemoteTransport(outcomes: outcomes, classifier: metadataClassifier)
+    }
 }
 
 // MARK: - Empty queue
@@ -97,7 +107,7 @@ extension ExecutionLoopTests {
         let secondDestination = try Self.makeExportURL()
         defer { Self.cleanup(secondDestination.parent) }
 
-        let transport = StubRemoteTransport(outcomes: [])
+        let transport = Self.makeStubTransport(outcomes: [])
         let recorder = SleepRecorder()
         let sleep = RecordingSleep.make(recorder: recorder)
 
@@ -107,7 +117,6 @@ extension ExecutionLoopTests {
             batchPolicy: Self.batchPolicy(),
             retryPolicy: Self.retryPolicy(),
             transport: transport,
-            classifier: Self.metadataClassifier,
             sleep: sleep
         )
 
@@ -122,7 +131,6 @@ extension ExecutionLoopTests {
             batchPolicy: Self.batchPolicy(),
             retryPolicy: Self.retryPolicy(),
             transport: transport,
-            classifier: Self.metadataClassifier,
             sleep: sleep
         )
 
@@ -146,7 +154,7 @@ extension ExecutionLoopTests {
         let secondDestination = try Self.makeExportURL()
         defer { Self.cleanup(secondDestination.parent) }
 
-        let transport = StubRemoteTransport(outcomes: [])
+        let transport = Self.makeStubTransport(outcomes: [])
         let recorder = SleepRecorder()
         let sleep = RecordingSleep.make(recorder: recorder)
 
@@ -164,7 +172,6 @@ extension ExecutionLoopTests {
             batchPolicy: Self.batchPolicy(),
             retryPolicy: Self.retryPolicy(),
             transport: transport,
-            classifier: Self.metadataClassifier,
             sleep: sleep,
             afterDrain: { batch in
                 #expect(batch.byteCount == 0)
@@ -184,7 +191,6 @@ extension ExecutionLoopTests {
             batchPolicy: Self.batchPolicy(),
             retryPolicy: Self.retryPolicy(),
             transport: transport,
-            classifier: Self.metadataClassifier,
             sleep: sleep
         )
 
@@ -228,7 +234,7 @@ extension ExecutionLoopTests {
         let destination = try Self.makeExportURL()
         defer { Self.cleanup(destination.parent) }
 
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .response(Self.successResponse()),
             .response(Self.successResponse()),
             .response(Self.successResponse())
@@ -241,7 +247,6 @@ extension ExecutionLoopTests {
             batchPolicy: Self.batchPolicy(),
             retryPolicy: Self.retryPolicy(),
             transport: transport,
-            classifier: Self.metadataClassifier,
             sleep: RecordingSleep.make(recorder: recorder)
         )
 
@@ -289,7 +294,7 @@ extension ExecutionLoopTests {
         //   entry 1: success on first attempt           (1 call)
         //   entry 2: retryable → retryable → success    (3 calls)
         //   entry 3: terminal on first attempt          (1 call)
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .response(Self.successResponse()),
             .response(Self.retryableResponse()),
             .response(Self.retryableResponse()),
@@ -304,7 +309,6 @@ extension ExecutionLoopTests {
             batchPolicy: Self.batchPolicy(),
             retryPolicy: Self.retryPolicy(maxAttempts: 4, seconds: 0.05),
             transport: transport,
-            classifier: Self.metadataClassifier,
             sleep: RecordingSleep.make(recorder: recorder)
         )
 
@@ -358,7 +362,7 @@ extension ExecutionLoopTests {
         let destination = try Self.makeExportURL()
         defer { Self.cleanup(destination.parent) }
 
-        let transport = StubRemoteTransport(
+        let transport = Self.makeStubTransport(
             outcomes: Array(
                 repeating: .response(Self.successResponse()), count: 5
             )
@@ -371,7 +375,6 @@ extension ExecutionLoopTests {
             batchPolicy: Self.batchPolicy(maxEntryCount: 2),
             retryPolicy: Self.retryPolicy(),
             transport: transport,
-            classifier: Self.metadataClassifier,
             sleep: RecordingSleep.make(recorder: recorder)
         )
 
@@ -395,7 +398,7 @@ extension ExecutionLoopTests {
 
 extension ExecutionLoopTests {
     @Test(
-        "runOnce leaves the queue's outstanding-batch state held; destructive removal is PR 5/N",
+        "runOnce leaves the outstanding-batch state held; destructive removal is the engine flush's concern",
         .tags(.lgr10, .lgr11)
     )
     func runOnceDoesNotAcknowledge() async throws {
@@ -409,7 +412,7 @@ extension ExecutionLoopTests {
         let destination = try Self.makeExportURL()
         defer { Self.cleanup(destination.parent) }
 
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .response(Self.successResponse())
         ])
         let recorder = SleepRecorder()
@@ -420,14 +423,13 @@ extension ExecutionLoopTests {
             batchPolicy: Self.batchPolicy(),
             retryPolicy: Self.retryPolicy(),
             transport: transport,
-            classifier: Self.metadataClassifier,
             sleep: RecordingSleep.make(recorder: recorder)
         )
 
         // A second drain before acknowledge must surface
         // `.batchAlreadyOutstanding`. This proves `runOnce` did NOT
         // invoke `acknowledge()` on its own; the destructive-removal
-        // boundary stays for PR 5/N.
+        // boundary stays for the engine's `flush()` to consume.
         let secondDestination = try Self.makeExportURL()
         defer { Self.cleanup(secondDestination.parent) }
         var captured: DurableRemoteQueueError?
@@ -439,10 +441,11 @@ extension ExecutionLoopTests {
         }
         #expect(captured == .batchAlreadyOutstanding)
         // The export artifact produced by the first drain must
-        // still be on disk: PR 4/N never removes the held
-        // outstanding-batch file, so the PR 5/N
-        // acknowledgement-to-removal lifecycle can read those
-        // bytes back when it wires up.
+        // still be on disk: `runOnce` never removes the held
+        // outstanding-batch file, so the engine's
+        // acknowledgement-to-removal lifecycle (in
+        // `RemoteEngine.flush()`) can read those bytes back
+        // through the outstanding-reuse path.
         #expect(FileManager.default.fileExists(atPath: destination.url.path))
     }
 }

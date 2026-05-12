@@ -151,6 +151,53 @@ extension BatchEngineTests {
     }
 }
 
+// MARK: - makeBatches: empty-batch emission is a forbidden invariant
+
+extension BatchEngineTests {
+    @Test(
+        "oversized single entry as first entry surfaces .batchSizeExceeded without emitting an empty batch",
+        .tags(.lgr4, .lgr7)
+    )
+    func oversizedFirstEntryRejected() throws {
+        let policy = try RemoteBatchPolicy.make(
+            maxEntryCount: .max, maxByteCount: 4
+        )
+        let entries = [
+            RemoteDeliveryEntry(
+                identifier: 1, payload: Data(repeating: 0xFF, count: 5)
+            )
+        ]
+        do {
+            _ = try BatchEngine.makeBatches(from: entries, policy: policy)
+            Issue.record("expected .batchSizeExceeded")
+        } catch {
+            #expect(error == .batchSizeExceeded(limit: 4, actual: 5))
+        }
+    }
+
+    @Test(
+        "boundary that reports exceeded over an empty running batch surfaces .invalidBatchState fail-closed",
+        .tags(.lgr4, .lgr7)
+    )
+    func boundaryExceededOverEmptyCurrentSurfacesInvalidBatchState() throws {
+        // The injected boundary forces an unreachable public-path
+        // state; the batcher must fail closed instead of emitting
+        // an empty batch.
+        let entries = [
+            RemoteDeliveryEntry(identifier: 1, payload: Data([0xAA]))
+        ]
+        do {
+            _ = try BatchEngine.makeBatches(
+                from: entries,
+                boundaryExceeded: { _, _, _ in true }
+            )
+            Issue.record("expected .invalidBatchState")
+        } catch {
+            #expect(error == .invalidBatchState)
+        }
+    }
+}
+
 // MARK: - makeBatches: ordering + duplicate identifiers
 
 extension BatchEngineTests {
@@ -273,10 +320,8 @@ extension BatchEngineTests {
         )
         #expect(batches.isEmpty)
 
-        // The batching engine never invokes `acknowledge()` and
-        // performs no destructive removal: the active segment
-        // remains empty (zero bytes) regardless of the queue's
-        // internal outstanding-batch state.
+        // The batching engine performs no acknowledgement or
+        // destructive removal.
         let activeSegment = directory.appendingPathComponent("log.ndjson")
         if FileManager.default.fileExists(atPath: activeSegment.path) {
             let bytes = try Data(contentsOf: activeSegment)

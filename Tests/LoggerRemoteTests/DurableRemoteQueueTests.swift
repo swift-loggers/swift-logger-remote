@@ -5,8 +5,11 @@ import Testing
 @testable import LoggerRemote
 
 /// Coverage for the persistence-backed durable queue core (LGR-10,
-/// LGR-11 enqueue/drain/acknowledge boundary). Batching, retry
-/// execution, and transport dispatch are deferred to later PRs.
+/// LGR-11 enqueue/drain/acknowledge boundary). Batching and
+/// retry execution live in `BatchEngineTests` / `RetryExecutorTests`
+/// / `ExecutionLoopTests`; the public flush lifecycle that ties
+/// drain / dispatch / acknowledge together lives in
+/// `RemoteEngineTests`.
 @Suite("DurableRemoteQueue persistence-backed core")
 struct DurableRemoteQueueTests {
     private static func uniqueDirectory() -> URL {
@@ -167,9 +170,14 @@ extension DurableRemoteQueueTests {
             metadata: ["sink": "elastic", "route": "primary"]
         ))
         try await queue.flush()
-        // Reaching this assertion proves the queue persists the
-        // entry losslessly: zero is a valid correlation identifier
-        // and metadata round-trips through the internal record.
+        let destination = try Self.makeExportURL()
+        defer { Self.cleanup(destination.parent) }
+        _ = try await queue.drain(to: destination.url)
+        let bytes = try Data(contentsOf: destination.url)
+        let decoded = try Self.decodeFirstRecord(in: bytes)
+        #expect(decoded.identifier == 0)
+        #expect(decoded.metadata == ["sink": "elastic", "route": "primary"])
+        #expect(decoded.payload == Data([0x01]))
     }
 
     @Test(

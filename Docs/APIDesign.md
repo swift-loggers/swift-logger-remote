@@ -14,17 +14,17 @@ Current scope is contract value types (PR 1/N), a minimal
 persistence-backed durable queue core (PR 2/N), engine-internal
 batching machinery that recovers entries from a drained queue
 export and splits them into deterministic batches under
-``RemoteBatchPolicy`` (PR 3/N), and an engine-internal retry /
+``RemoteBatchPolicy`` (PR 3/N), an engine-internal retry /
 execution loop that drives the per-entry retry budget over the
 existing queue + batching + transport primitives under
-``RemoteRetryPolicy`` (M3.4 PR 4/N). The retry / execution loop
-adds no public surface beyond the existing contract value types;
-``RetryExecutor``, ``ExecutionLoop``, ``RemoteDeliveryAttempt``,
-and ``ExecutionLoopError`` are internal machinery the test target
-reaches through `@testable import`. Flush / lifecycle observer,
-production ``RemoteTransport`` adapter integration, the
-acknowledgement-to-removal lifecycle closure, and the
-`swift-logger-elastic` migration ship in later PRs.
+``RemoteRetryPolicy`` (PR 4/N), and the public engine surface
+(M3.4 PR 5/N) — ``RemoteEngine`` + ``flush()`` — that wraps the
+engine-internal loop with the acknowledgement-to-removal lifecycle
+closure for non-empty flush passes and the
+``RemoteTransport/classify(_:)`` sink-owned classification hook.
+PR 5/N closes M3.4.
+The `swift-logger-elastic` migration and the vendor-specific
+adapter family ship in later milestones.
 
 ## Engine Boundary
 
@@ -140,8 +140,9 @@ The queue scope remains intentionally narrow:
   ``DurableRemoteQueueError/batchAlreadyOutstanding`` and leaves
   the persistence-layer removal boundary intact. A failed
   `acknowledge()` keeps the outstanding batch held so the caller
-  can retry against the same captured boundary; only a successful
-  `acknowledge()` clears the state and re-opens drain.
+  can retry against the still-held outstanding-batch boundary;
+  only a successful `acknowledge()` clears the state and re-opens
+  drain.
 - ``DurableRemoteQueueBatch/byteCount`` is the exact post-export
   file size. The queue rejects a drain whose post-export size
   cannot be read (``DurableRemoteQueueError/drainSizeReadFailed``)
@@ -206,8 +207,9 @@ Two pure steps drive one drained queue export:
 
 The engine never deduplicates, sorts, or classifies entries; it
 never calls ``DurableRemoteQueue/acknowledge()`` and never
-performs any destructive removal. Lifecycle hooks and production
-transport integration ship in later PRs.
+performs any destructive removal. Caller-driven lifecycle closure
+belongs to ``RemoteEngine/flush()``; production transport adapter
+integration belongs to adapter packages and later milestones.
 
 ## Retry / Execution Loop (engine-internal)
 
@@ -221,7 +223,7 @@ types already carry the engine surface.
 
 Two engine-internal namespaces compose the loop:
 
-1. **`RetryExecutor.deliver(entry:transport:policy:classifier:sleep:)`**
+1. **`RetryExecutor.deliver(entry:transport:policy:sleep:delayCalculator:)`**
    drives one ``RemoteDeliveryEntry`` through the
    ``RemoteRetryPolicy`` budget:
    - Each attempt invokes ``RemoteTransport/send(payloadBytes:payloadMetadata:)``
@@ -229,7 +231,7 @@ Two engine-internal namespaces compose the loop:
      is per-entry; the engine never aggregates entry bytes into a
      single wire payload (LGR-5: the engine does not impose NDJSON,
      line-delimited proto, or any other wire format on adapters).
-   - The injected `classifier` maps each transport result
+   - ``RemoteTransport/classify(_:)`` maps each transport result
      (``RemoteTransportResponse`` or thrown error) into a
      ``RemoteDeliveryResult``. Classification is sink-owned (LGR-7,
      LGR-9); the engine never inspects HTTP status, vendor body
@@ -247,18 +249,25 @@ Two engine-internal namespaces compose the loop:
      rather than a no-op sleep.
    - A delay-calculation failure (the engine seam over
      ``RemoteRetryPolicy/delayBeforeRetry(attempt:)``) surfaces
-     ``ExecutionLoopError/invalidRetryDelay(_:)`` carrying the
+     ``BatchDeliveryError/invalidRetryDelay(_:)`` carrying the
      underlying ``RemoteDeliveryError``. The
      ``RemoteRetryPolicy/make(maxAttempts:backoff:)`` factory
      already enforces that the default calculation accepts every
      `attempt` value the executor passes from a validated policy,
      so this case names an engine-side / seam-injected invariant
      violation and is never collapsed into
-     ``ExecutionLoopError/sleepInterrupted``.
+     ``BatchDeliveryError/sleepInterrupted``.
    - A sleep-injector failure between two retryable attempts
-     surfaces ``ExecutionLoopError/sleepInterrupted``, distinct
+     surfaces ``BatchDeliveryError/sleepInterrupted``, distinct
      from a delay-calculation failure.
-2. **`ExecutionLoop.runOnce(queue:exportURL:batchPolicy:retryPolicy:transport:classifier:sleep:afterDrain:)`**
+   - ``RetryExecutor.deliver(...)`` throws
+     ``BatchDeliveryError`` directly. The broader
+     ``ExecutionLoopError`` surface is reached only at the
+     ``ExecutionLoop/runOnce(...)`` mapping layer, which projects
+     the four narrow ``BatchDeliveryError`` cases plus its own
+     drain / empty-release cases into a single
+     ``runOnce``-callable error type.
+2. **`ExecutionLoop.runOnce(queue:exportURL:batchPolicy:retryPolicy:transport:sleep:afterDrain:)`**
    composes one full delivery pass:
    - ``DurableRemoteQueue/drain(to:)`` captures the current
      recoverable prefix as a byte-stable export.
@@ -280,28 +289,30 @@ Two engine-internal namespaces compose the loop:
      order. An empty queue produces `[]`.
 
 The loop does **not** invoke ``DurableRemoteQueue/acknowledge()``
-on a non-empty delivered batch and performs no destructive removal
+on a non-empty drained batch and performs no destructive removal
 of delivered queue payload bytes; the acknowledgement-to-removal
-lifecycle closure belongs to PR 5/N. A non-empty batch held by the queue
-from a preceding `runOnce` call therefore surfaces as
+lifecycle closure is owned by ``RemoteEngine/flush()`` above this
+layer. A non-empty batch held by the queue from a preceding `runOnce`
+call therefore surfaces as
 ``DurableRemoteQueueError/batchAlreadyOutstanding`` on the next
-`runOnce` (the queue contract from PR 2/N) until the PR 5/N
-lifecycle wires the explicit acknowledgement.
+`runOnce` (the queue contract from PR 2/N) until engine-owned lifecycle
+code performs the explicit acknowledgement.
 
 The empty-drain path is intentionally different. When the queue
 returns ``DurableRemoteQueueBatch/byteCount`` `== 0`, ``runOnce``
 short-circuits **before** invoking
-``BatchEngine/recoverEntries(from:)`` — there is nothing to
+``BatchEngine.recoverEntries(from:)`` — there is nothing to
 parse — and releases the held outstanding-batch boundary by
 calling ``DurableRemoteQueue/acknowledge()`` before returning
 `[]`. The release is keyed off the authoritative zero-byte
 signal the queue returns from drain rather than off "the
 recovered entry stream is empty"; a missing or unreadable export
-artifact after a zero-byte drain signal cannot block this path.
+artifact after the queue's authoritative zero-byte drain signal cannot
+block this path.
 The empty drain boundary release
 does not advance any destructive-removal of delivered queue
 payload bytes (there are none) and stays distinct from the non-empty
-acknowledgement-to-removal lifecycle PR 5/N wires; it exists
+acknowledgement-to-removal lifecycle ``RemoteEngine/flush()`` runs; it exists
 only so a polling caller does not get blocked on
 ``DurableRemoteQueueError/batchAlreadyOutstanding`` on the next
 empty pass. A failure of that empty drain boundary release
@@ -313,6 +324,13 @@ internal struct RemoteDeliveryAttempt: Sendable, Equatable {
     let entry: RemoteDeliveryEntry
     let outcome: RemoteDeliveryResult
     let attempts: Int
+}
+
+internal enum BatchDeliveryError: Error, Sendable, Equatable {
+    case recoverFailed(BatchEngineError)
+    case batchSplitFailed(RemoteDeliveryError)
+    case invalidRetryDelay(RemoteDeliveryError)
+    case sleepInterrupted
 }
 
 internal enum ExecutionLoopError: Error, Sendable, Equatable {
@@ -329,11 +347,10 @@ internal enum RetryExecutor {
         entry: RemoteDeliveryEntry,
         transport: any RemoteTransport,
         policy: RemoteRetryPolicy,
-        classifier: @Sendable (Result<RemoteTransportResponse, any Error>) async -> RemoteDeliveryResult,
         sleep: @Sendable (Double) async throws -> Void,
         delayCalculator: @Sendable (RemoteRetryPolicy, Int) throws(RemoteDeliveryError) -> Double
             = { policy, attempt in try policy.delayBeforeRetry(attempt: attempt) }
-    ) async throws(ExecutionLoopError) -> RemoteDeliveryAttempt
+    ) async throws(BatchDeliveryError) -> RemoteDeliveryAttempt
 }
 
 internal enum ExecutionLoop {
@@ -343,7 +360,6 @@ internal enum ExecutionLoop {
         batchPolicy: RemoteBatchPolicy,
         retryPolicy: RemoteRetryPolicy,
         transport: any RemoteTransport,
-        classifier: @Sendable (Result<RemoteTransportResponse, any Error>) async -> RemoteDeliveryResult,
         sleep: @Sendable (Double) async throws -> Void,
         afterDrain: @Sendable (DurableRemoteQueueBatch) async -> Void = { _ in }
     ) async throws(ExecutionLoopError) -> [RemoteDeliveryAttempt]
@@ -416,6 +432,17 @@ public protocol RemoteTransport: Sendable {
         payloadBytes: Data,
         payloadMetadata: [String: String]
     ) async throws -> RemoteTransportResponse
+
+    // Sink-owned response classification. This is pre-release API
+    // and is locked by PR 5/N before the first tag. Classification
+    // must be deterministic for the same transport result within a
+    // flush pass. Classification MUST NOT
+    // call queue acknowledgement / removal APIs and MUST NOT mutate
+    // engine lifecycle state; it only maps a send result to a
+    // delivery result.
+    func classify(
+        _ result: Result<RemoteTransportResponse, any Error>
+    ) async -> RemoteDeliveryResult
 }
 
 public struct RemoteTransportResponse: Sendable, Equatable {
@@ -436,21 +463,213 @@ public enum RemoteDeliveryError: Error, Sendable, Equatable {
 
 ## Engine Surface
 
-`RemoteEngine` is a placeholder type with no dispatch lifecycle and
-no persistence ownership in the current milestone. It does not run a
-delivery loop and exposes no public dispatch API yet. The shape of
-the public engine surface is intentionally deferred until the contract
-value types are reviewed and locked.
+``RemoteEngine`` is the public delivery surface. It is a sink-
+neutral, caller-driven dispatch actor:
+
+- **Caller-driven.** The engine owns no timer, no platform
+  lifecycle observer, no autonomous scheduler. Host applications
+  decide when to call ``flush()`` (LGR-3). Concurrent ``flush()``
+  invocations serialize through actor isolation; the engine never
+  runs two passes against the same queue simultaneously.
+- **Sink-neutral.** ``RemoteTransport`` owns both
+  ``send(payloadBytes:payloadMetadata:)`` and ``classify(_:)``;
+  the engine never inspects HTTP status, vendor body codes, or
+  transport error types (LGR-5 / LGR-7 / LGR-9). Classification
+  is a pure lifecycle input to the engine's decision and must be
+  deterministic for the same transport result within a flush pass:
+  it MUST NOT call queue acknowledgement / removal APIs and MUST
+  NOT mutate engine lifecycle state.
+- **Per-flush export scratch.** The engine takes an
+  `exportDirectory: URL` at init. The caller owns the directory's
+  lifecycle: it MUST already exist, MUST be writable by the
+  engine's process, and SHOULD be a caller-controlled private
+  location not shared with other code paths. The engine creates
+  only unique scratch export files inside the directory; it does
+  not create the parent directory, set or audit access-control
+  policy, or sweep pre-existing files. Every ``flush()`` first
+  consults ``DurableRemoteQueue/currentOutstandingBatch()``:
+  when the queue is still holding a previously drained batch
+  the engine reuses that batch (and its already-written export
+  file) through the outstanding-reuse path without flushing or
+  draining new bytes. The fresh-drain path runs only when there
+  is no outstanding batch: the engine calls
+  ``DurableRemoteQueue/flush()`` so every admitted entry is on
+  disk, allocates a fresh unique filename inside the directory,
+  and drains into it through ``DurableRemoteQueue/drain(to:)``.
+  A queue-flush failure on this fresh-drain path surfaces as
+  ``RemoteEngineError/flushFailed(_:)`` before the engine owns
+  a reusable drained batch reference for the current flush pass.
+  The export artifact is removed **only** after a successful
+  empty release or a successful non-empty acknowledge; any
+  `.retryable`-exhausted tally and any parse / batch /
+  retry-interruption / acknowledge failure after the engine owns
+  a reusable drained batch reference for the current flush pass
+  keep the retained export artifact so the next ``flush()``
+  replays it through the outstanding-reuse path. Cleanup failures on the removal step
+  surface as ``RemoteEngineError/exportCleanupFailed(_:)`` rather
+  than being silently swallowed; the carried
+  ``RemoteEngineExportCleanupContext`` records the export URL,
+  the cleanup phase, and the error domain / code captured from
+  the bridged `NSError` representation. Cleanup failure fires
+  only after the final acknowledgement state for the phase is
+  already reached, so it MUST NOT trigger retry of already
+  acknowledged bytes: callers branch on the surfaced error
+  without re-entering the delivery lifecycle for the same bytes.
+  On ``RemoteEngineExportCleanupContext/Phase/emptyRelease``
+  the empty-drain boundary is already cleared and no delivered
+  queue payload bytes existed, so the empty scratch artifact is
+  a leftover; callers MAY remove the retained URL after observing
+  this case. On
+  ``RemoteEngineExportCleanupContext/Phase/acknowledgedNonEmpty``
+  the queue's destructive removal has already run — the
+  persistence layer has dropped the delivered queue payload
+  bytes — and the retained artifact is a duplicate copy, not a
+  retry source: the engine never re-reads it and the next
+  ``RemoteEngine/flush()`` sees no outstanding batch on the
+  queue. Callers MAY remove the retained URL after observing this
+  case. Callers must keep the directory engine-exclusive.
+- **Acknowledgement-to-removal lifecycle (LGR-11).** After every
+  non-empty flush pass, the engine inspects all
+  ``RemoteDeliveryAttempt`` outcomes from the drained export. If
+  every recovered entry is
+  resolved (``RemoteDeliveryResult/success`` or
+  ``RemoteDeliveryResult/terminal(reason:)``) the engine calls
+  ``DurableRemoteQueue/acknowledge()`` and returns
+  ``RemoteFlushAcknowledgement/removedDeliveredBytes``. A single
+  ``RemoteDeliveryResult/retryable(reason:)`` outcome (budget
+  exhausted without resolution) keeps the outstanding-batch
+  boundary held so the next ``flush()`` retries the same drained
+  bytes; the summary acknowledgement is then
+  ``RemoteFlushAcknowledgement/notAcknowledged``.
+  If ``DurableRemoteQueue/acknowledge()`` fails, subsequent
+  ``flush()`` calls reuse the same outstanding batch and export
+  artifact until acknowledgement succeeds.
+  ``RemoteDeliveryResult/terminal(reason:)`` is sink-decided
+  permanent failure — the classifier owns the judgment — so
+  removing those bytes is forward progress, not data loss.
+- **Empty drain release.** On
+  ``DurableRemoteQueueBatch/byteCount`` `== 0` the engine
+  short-circuits inside the execution loop, releases the held
+  boundary, and reports a summary with zero counts and
+  ``RemoteFlushAcknowledgement/emptyReleased``. An empty drain is
+  not an attempted batch: ``RemoteFlushSummary/attemptedBatches``
+  is `0` because ``BatchEngine`` `.makeBatches(from:policy:)` is
+  not invoked over zero delivered queue payload bytes. No
+  delivered queue payload bytes are removed because none existed.
 
 ```text
 public actor RemoteEngine {
-    // Public dispatch API lands in a later M3.4 milestone.
+    public init(
+        queue: DurableRemoteQueue,
+        exportDirectory: URL,
+        transport: any RemoteTransport,
+        batchPolicy: RemoteBatchPolicy,
+        retryPolicy: RemoteRetryPolicy
+    )
+
+    public func flush() async throws(RemoteEngineError) -> RemoteFlushSummary
+}
+
+public struct RemoteFlushSummary: Sendable, Equatable {
+    public let attemptedBatches: Int
+    public let attemptedEntries: Int
+    public let succeededEntries: Int
+    public let terminalEntries: Int
+    public let retryableEntries: Int
+    public let acknowledgement: RemoteFlushAcknowledgement
+}
+
+public enum RemoteFlushAcknowledgement: Sendable, Equatable {
+    case emptyReleased
+    case removedDeliveredBytes
+    case notAcknowledged
+}
+
+public enum RemoteEngineError: Error, Sendable, Equatable {
+    // Public projection of a `DurableRemoteQueue.flush()` failure.
+    // The engine does not reach through the queue boundary or expose
+    // `FileLogStoreError` directly.
+    case flushFailed(DurableRemoteQueueError)
+
+    // Public projection of a `DurableRemoteQueue.drain(to:)`
+    // failure before the engine owns a delivered batch reference.
+    case drainFailed(DurableRemoteQueueError)
+
+    case parseFailed(RemoteEngineParseError)
+    case batchFailed(RemoteDeliveryError)
+    case retryInterrupted(RemoteEngineRetryError)
+
+    // Acknowledge failed after a boundary was captured. The queue
+    // keeps the outstanding batch held and the export artifact stays
+    // on disk; subsequent flushes reuse the same outstanding batch /
+    // export artifact until acknowledgement succeeds.
+    case acknowledgementFailed(DurableRemoteQueueError)
+
+    // Export artifact cleanup failed after empty release or
+    // acknowledged non-empty removal. Cleanup failure MUST NOT cause
+    // retry of bytes that were already acknowledged.
+    case exportCleanupFailed(RemoteEngineExportCleanupContext)
+}
+
+public struct RemoteEngineExportCleanupContext: Sendable, Equatable {
+    public enum Phase: Sendable, Equatable {
+        case emptyRelease
+        case acknowledgedNonEmpty
+    }
+    public let exportURL: URL
+    public let phase: Phase
+    // Captured from the bridged `NSError` representation.
+    public let errorDomain: String
+    public let errorCode: Int
+}
+
+// Public projection of the engine-internal BatchEngineError
+// taxonomy. This enum preserves parser failure categories at the
+// public RemoteEngine boundary; it does not define a second parser
+// contract independent from the engine-internal batching parser.
+// Detail-free cases such as `envelopeMalformed` intentionally do
+// not expose raw JSON/parser diagnostics.
+public enum RemoteEngineParseError: Error, Sendable, Equatable {
+    case exportFileReadFailed
+    case exportByteCountMismatch(expected: UInt64, actual: UInt64)
+    case exportByteCountUnavailable
+    case envelopeMalformed
+    case envelopeContentTypeMismatch(expected: String, found: String)
+    case recordPayloadBase64Invalid
+    case recordPayloadMalformed
+    case recordFormatVersionMissing
+    case recordFormatVersionUnsupported(found: UInt64, supported: UInt8)
+}
+
+public enum RemoteEngineRetryError: Error, Sendable, Equatable {
+    case invalidRetryDelay(RemoteDeliveryError)
+    case sleepInterrupted
 }
 ```
 
+### Lifecycle integration (host responsibility)
+
+The engine intentionally stays platform-neutral: it imports no
+`UIKit`, no `AppKit`, no `WatchKit`, no `NotificationCenter`
+observer. Host applications wire lifecycle integration on their
+own side:
+
+- iOS / iPadOS / tvOS: observe
+  `UIApplication.didEnterBackgroundNotification` (or
+  `BGTaskScheduler` events) and call ``RemoteEngine/flush()``.
+- macOS: observe `NSWorkspace.willPowerOffNotification` or
+  app-specific shutdown hooks and call ``RemoteEngine/flush()``.
+- Server-side: drive ``flush()`` from a graceful-shutdown
+  signal handler or a periodic task.
+
+Because the engine actor serializes concurrent ``flush()``
+invocations, hosts can call it from multiple lifecycle hooks
+without coordination; overlapping calls simply queue and run
+sequentially.
+
 ## Sink-Neutrality Acceptance
 
-Before any public API is locked beyond the value types above, the
+Before adapter APIs are locked beyond the core engine surface, the
 contract must be validated against at least two non-equivalent
 backend response models so the engine is not silently shaped only by
 Elastic semantics:
@@ -466,50 +685,35 @@ HTTP-backed adapter family lands in M5.
 
 ## Out Of Scope
 
-- No public ``RemoteEngine`` dispatch lifecycle in the current
-  milestone scope. The engine-internal ``RetryExecutor`` /
-  ``ExecutionLoop`` machinery (PR 4/N) drives one delivery pass
-  per `runOnce(...)` call from the test target via
-  `@testable import`; ``RemoteEngine`` itself stays a placeholder.
-- No autonomous timer or production network transport. The
-  wall-clock backoff is taken from a caller-injected
-  `Double`-seconds sleep closure (LGR-3) and the
-  ``RemoteTransport`` calls are dispatched through whatever
-  conformer the caller hands in; the current PR exercises only the
-  test-only ``StubRemoteTransport`` fixture.
-- No acknowledgement-to-removal lifecycle closure for non-empty
-  delivered batches. ``ExecutionLoop/runOnce(...)`` performs an
-  empty drain boundary release so a polling caller does not get
-  blocked, but that zero-byte empty drain boundary release is the
-  only ``DurableRemoteQueue/acknowledge()`` call in the current
-  milestone. The loop never invokes `acknowledge()` on a
-  delivered non-empty batch — that lifecycle wires in PR 5/N.
-- No network implementation, no `URLSession`, no socket transport.
+- No autonomous timer or scheduler in the public engine. The
+  wall-clock backoff is taken from an engine-internal sleep
+  injector backed by `Task.sleep` (LGR-3); the
+  engine never observes platform lifecycle events on its own.
+- No platform-specific lifecycle observer (`UIApplication`,
+  `NSWorkspace`, `NotificationCenter`, etc.). Hosts wire those
+  on their side and call ``RemoteEngine/flush()`` from the
+  appropriate hook.
+- No production network transport in this package. The engine
+  dispatches through whatever ``RemoteTransport`` conformer the
+  caller hands in; the current milestone exercises only the
+  test-only ``StubRemoteTransport`` fixture. Concrete adapters
+  (Elastic `_bulk`, Splunk HEC, …) ship in later milestones.
+- No vendor-specific encoders, request builders, or response
+  validators in the core engine — those live in adapter packages
+  (LGR-9).
 - No `swift-logger-elastic` migration.
 - No Datadog/Splunk/Loki/Dynatrace adapter packages.
 - No SDK-backed adapters (Datadog mobile SDK, Splunk RUM SDK,
   Dynatrace OneAgent) — those bypass this engine by design.
 - No tags or releases.
 
-## Deferred: Flush Lifecycle
-
-A flush-lifecycle vocabulary (e.g. opportunistic / lifecycle-driven /
-manual) is intentionally deferred. Naming a `RemoteFlushPolicy.onLifecycle`
-case would prematurely commit to platform lifecycle semantics
-(`UIApplication`/`NSWorkspace`/etc.) before the host-supplied
-lifecycle-observer surface is designed. The flush-trigger
-vocabulary and the lifecycle-observer surface stay PR 5/N
-concerns; the engine-internal retry / execution loop from PR 4/N
-is purely caller-driven (one `runOnce(...)` call per pass) and
-intentionally exposes no flush trigger of its own.
-
 ## Milestone Map
 
 | Milestone | Scope |
 | --- | --- |
 | M3.4 PR 3/N | Batching engine: deterministic batch construction, entry/byte caps, oversized-entry behavior, byte-stable export → entry-stream parser with fail-closed `formatVersion` validation. Engine-internal machinery. |
-| M3.4 PR 4/N (this milestone) | Retry / execution loop: per-entry retry budget over the existing queue + batching + transport primitives, backoff progression in `Double` seconds through an injected sleep closure, attempt accounting, terminal vs retryable routing, test-only `StubRemoteTransport` fixture explicitly marked as such (not public API). No public API change; `RetryExecutor`, `ExecutionLoop`, `RemoteDeliveryAttempt`, and `ExecutionLoopError` are engine-internal. No `acknowledge()` call for non-empty delivered batches; empty drain boundary release occurs without destructive removal of delivered queue payload bytes. |
-| M3.4 PR 5/N | Flush trigger semantics, lifecycle hook surface, production `RemoteTransport` adapter integration, acknowledgement-to-removal lifecycle, final docs / coverage / CI closure for M3.4. |
+| M3.4 PR 4/N | Retry / execution loop: per-entry retry budget over the existing queue + batching + transport primitives, backoff progression in `Double` seconds through an injected sleep closure, attempt accounting, terminal vs retryable routing, test-only `StubRemoteTransport` fixture explicitly marked as such (not public API). Engine-internal `RetryExecutor`, `ExecutionLoop`, `RemoteDeliveryAttempt`, `ExecutionLoopError` machinery; no public API change in PR 4/N itself. |
+| M3.4 PR 5/N (this milestone) | Public delivery surface: `RemoteEngine` actor + `flush()` over the engine-internal loop, `RemoteFlushSummary`, `RemoteEngineError` (+ `RemoteEngineParseError`, `RemoteEngineRetryError`), `RemoteTransport.classify(_:)` sink-owned classification, acknowledgement-to-removal lifecycle closure for non-empty flush passes (engine acknowledges when every recovered entry is `.success` or `.terminal`; any `.retryable` keeps the boundary held for the next flush). Closes M3.4. |
 | M3.5 | Migrate `swift-logger-elastic` onto this engine; Elastic-specific code stays in the adapter (ECS encoder, `_bulk` request builder, `_bulk` response validator). |
 | M4 | Second remote adapter (Datadog Logs intake or Splunk HEC) as a protocol sanity check. |
 | M5 | HTTP-backed adapter family built on top of this engine. |

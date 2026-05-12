@@ -46,13 +46,18 @@ internal struct StubTransportCall: Sendable, Equatable {
 }
 
 /// Programmable `RemoteTransport` fixture used by the retry /
-/// execution-loop tests.
+/// execution-loop / engine tests.
 ///
-/// Each call consumes the next entry from `outcomes`; once
-/// `outcomes` is exhausted, additional calls fail through
+/// Each `send(...)` call consumes the next entry from `outcomes`;
+/// once `outcomes` is exhausted, additional calls fail through
 /// ``StubTransportError/Kind/permanentFailure`` so a runaway loop
 /// does not silently re-enter an undefined slot. Recorded calls are
 /// exposed through ``recordedCalls()`` for ordered assertion.
+///
+/// Classification (``RemoteTransport/classify(_:)``) is sink-owned
+/// in production; tests inject a `classifier` closure at init so
+/// per-test classification logic stays adjacent to the per-test
+/// transport-outcome scripting.
 ///
 /// Marked `final` + actor-isolated to satisfy
 /// ``RemoteTransport``'s `Sendable` requirement; the fixture itself
@@ -60,9 +65,15 @@ internal struct StubTransportCall: Sendable, Equatable {
 internal final actor StubRemoteTransport: RemoteTransport {
     private var outcomes: [StubTransportOutcome]
     private var calls: [StubTransportCall] = []
+    private let classifier:
+        @Sendable (Result<RemoteTransportResponse, any Error>) async -> RemoteDeliveryResult
 
-    init(outcomes: [StubTransportOutcome]) {
+    init(
+        outcomes: [StubTransportOutcome],
+        classifier: @escaping @Sendable (Result<RemoteTransportResponse, any Error>) async -> RemoteDeliveryResult
+    ) {
         self.outcomes = outcomes
+        self.classifier = classifier
     }
 
     func send(
@@ -83,6 +94,12 @@ internal final actor StubRemoteTransport: RemoteTransport {
         case let .failure(error):
             throw error
         }
+    }
+
+    func classify(
+        _ result: Result<RemoteTransportResponse, any Error>
+    ) async -> RemoteDeliveryResult {
+        await classifier(result)
     }
 
     func recordedCalls() -> [StubTransportCall] {
@@ -109,7 +126,8 @@ internal final actor SleepRecorder {
 /// suitable for the retry executor's `sleep` parameter. The default
 /// shape only records; pass `throwOnSleepIndex` to make the closure
 /// throw exactly once at that 0-indexed sleep so tests can drive
-/// the ``ExecutionLoopError/sleepInterrupted`` branch.
+/// the sleep-interruption branches in retry executor, execution
+/// loop, and engine tests.
 internal enum RecordingSleep {
     static func make(
         recorder: SleepRecorder,

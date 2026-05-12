@@ -11,9 +11,14 @@
 /// intentionally dropped because the engine treats every
 /// sleep-injector failure as equivalent at this layer.
 ///
-/// The error is engine-internal: PR 4/N exposes no public delivery
-/// surface and the execution loop's typed throw flows only through
-/// engine machinery and the test target via `@testable import`.
+/// The error is engine-internal. ``RemoteEngine/flush()`` is the
+/// only production caller; ``ExecutionLoop/runOnce(...)`` throws
+/// this surface for the engine-internal lifecycle (drain +
+/// empty-release) that the engine wraps differently in
+/// production. The public translation lives on
+/// ``RemoteEngineError``; the execution-loop typed throw flows
+/// otherwise only through the test target via `@testable
+/// import`.
 internal enum ExecutionLoopError: Error, Sendable {
     /// ``DurableRemoteQueue/drain(to:)`` failed; the queue's
     /// outstanding-batch state is preserved per the queue contract.
@@ -48,28 +53,29 @@ internal enum ExecutionLoopError: Error, Sendable {
 
     /// The empty-drain release path failed.
     ///
-    /// ``ExecutionLoop/runOnce(queue:exportURL:batchPolicy:retryPolicy:transport:classifier:sleep:afterDrain:)``
-    /// MAY call ``DurableRemoteQueue/acknowledge()`` after a drain
+    /// ``ExecutionLoop/runOnce(queue:exportURL:batchPolicy:retryPolicy:transport:sleep:afterDrain:)``
+    /// calls ``DurableRemoteQueue/acknowledge()`` after a drain
     /// whose ``DurableRemoteQueueBatch/byteCount`` is `0` so a
     /// polling caller does not get blocked on
     /// ``DurableRemoteQueueError/batchAlreadyOutstanding`` on the
     /// next pass. The release is keyed off the authoritative
     /// zero-byte signal the queue returns from drain, before any
-    /// export-file read; a missing or unreadable zero-byte export
-    /// artifact between drain and the would-be parse step cannot
-    /// block this path. The empty release does not advance any
-    /// destructive-removal of delivered queue payload bytes —
+    /// export-file read; a missing or unreadable export artifact
+    /// after the queue's authoritative zero-byte drain signal
+    /// cannot block this path. The empty release does not advance
+    /// any destructive-removal of delivered queue payload bytes —
     /// there are no delivered queue payload bytes — so it stays
-    /// distinct from the acknowledgement-to-removal lifecycle that
-    /// PR 5/N wires for non-empty delivered batches. A failure of
-    /// that empty release surfaces here rather than being masked as
-    /// ``ExecutionLoopError/drainFailed(_:)``.
+    /// distinct from the acknowledgement-to-removal lifecycle
+    /// ``RemoteEngine/flush()`` runs for non-empty flush passes.
+    /// A failure of that empty release surfaces here rather than
+    /// being masked as ``ExecutionLoopError/drainFailed(_:)``.
     case emptyBatchReleaseFailed(DurableRemoteQueueError)
 
     /// The sleep injector threw between two retryable attempts.
-    /// Treated as an opaque interruption at this layer; the caller
-    /// or future engine-owned lifecycle integration decides whether
-    /// to retry the drained batch.
+    /// Treated as an opaque interruption at this layer; the engine
+    /// layer above (``RemoteEngine/flush()``) decides whether to
+    /// retry the drained batch on the next caller-driven flush
+    /// through the outstanding-reuse path.
     case sleepInterrupted
 }
 
