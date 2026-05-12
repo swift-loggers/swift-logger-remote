@@ -29,7 +29,10 @@ extension RemoteBackendShapeTests {
         }
     }
 
-    @Test("Elastic bulk fixture maps vendor statuses to RemoteDeliveryResult")
+    @Test(
+        "Elastic bulk fixture maps vendor statuses to RemoteDeliveryResult",
+        .tags(.lgr2, .lgr7, .lgr8, .lgr9)
+    )
     func elasticBulkItemStatusesClassify() {
         // Mixed bulk: success, retryable (429), terminal (400).
         let results = Self.classifyElasticBulkItems(
@@ -62,7 +65,10 @@ extension RemoteBackendShapeTests {
         return .terminal(reason: .transportRejected)
     }
 
-    @Test("Splunk HEC fixture maps status and body code to RemoteDeliveryResult")
+    @Test(
+        "Splunk HEC fixture maps status and body code to RemoteDeliveryResult",
+        .tags(.lgr2, .lgr7, .lgr8, .lgr9)
+    )
     func hecResponseClassifies() {
         #expect(Self.classifyHECResponse(
             httpStatusCode: 200, hecBodyCode: 0

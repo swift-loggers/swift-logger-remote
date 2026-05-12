@@ -1,3 +1,5 @@
+// swiftlint:disable file_length - LGR-4 / LGR-10 / LGR-11 batching-engine test inventory kept in a single file for traceability; per-LGR Swift Testing tag annotations expanded `@Test(...)` headers, growing the file past the default 500-line cap without adding new test cases.
+
 import Foundation
 import Testing
 
@@ -31,7 +33,10 @@ struct BatchEngineTests {
 // MARK: - makeBatches: count cap
 
 extension BatchEngineTests {
-    @Test("count cap splits the entry stream into batches of at most maxEntryCount entries")
+    @Test(
+        "count cap splits the entry stream into batches of at most maxEntryCount entries",
+        .tags(.lgr4)
+    )
     func countCapSplitsEntryStream() throws {
         let policy = try RemoteBatchPolicy.make(
             maxEntryCount: 2, maxByteCount: .max
@@ -54,7 +59,10 @@ extension BatchEngineTests {
 // MARK: - makeBatches: byte cap
 
 extension BatchEngineTests {
-    @Test("byte cap splits the entry stream when payload bytes would exceed maxByteCount")
+    @Test(
+        "byte cap splits the entry stream when payload bytes would exceed maxByteCount",
+        .tags(.lgr4)
+    )
     func byteCapSplitsEntryStream() throws {
         let policy = try RemoteBatchPolicy.make(
             maxEntryCount: .max, maxByteCount: 4
@@ -84,7 +92,10 @@ extension BatchEngineTests {
 // MARK: - makeBatches: equal-to-cap fits, strictly-greater fires
 
 extension BatchEngineTests {
-    @Test("equal-to-cap fits in the current batch and strictly-greater starts the next")
+    @Test(
+        "equal-to-cap fits in the current batch and strictly-greater starts the next",
+        .tags(.lgr4)
+    )
     func boundaryEqualToCapFits() throws {
         let policy = try RemoteBatchPolicy.make(
             maxEntryCount: .max, maxByteCount: 10
@@ -117,7 +128,10 @@ extension BatchEngineTests {
 // MARK: - makeBatches: oversized single entry
 
 extension BatchEngineTests {
-    @Test("oversized single entry surfaces .batchSizeExceeded(limit:actual:)")
+    @Test(
+        "oversized single entry surfaces .batchSizeExceeded(limit:actual:)",
+        .tags(.lgr4, .lgr7)
+    )
     func oversizedSingleEntryRejected() throws {
         let policy = try RemoteBatchPolicy.make(
             maxEntryCount: .max, maxByteCount: 8
@@ -140,7 +154,10 @@ extension BatchEngineTests {
 // MARK: - makeBatches: ordering + duplicate identifiers
 
 extension BatchEngineTests {
-    @Test("accepted ordering from the byte-stable queue export is preserved across batches")
+    @Test(
+        "accepted ordering from the byte-stable queue export is preserved across batches",
+        .tags(.lgr4, .lgr10)
+    )
     func acceptedOrderingPreservedAcrossBatches() throws {
         let policy = try RemoteBatchPolicy.make(
             maxEntryCount: 2, maxByteCount: .max
@@ -155,7 +172,10 @@ extension BatchEngineTests {
         #expect(flat.map(\.identifier) == identifiers)
     }
 
-    @Test("duplicate identifiers survive batching verbatim")
+    @Test(
+        "duplicate identifiers survive batching verbatim",
+        .tags(.lgr4, .lgr10)
+    )
     func duplicateIdentifiersPreserved() throws {
         let policy = try RemoteBatchPolicy.make(
             maxEntryCount: 2, maxByteCount: .max
@@ -176,7 +196,10 @@ extension BatchEngineTests {
 // MARK: - recoverEntries: queue-driven end-to-end
 
 extension BatchEngineTests {
-    @Test("queue export -> recovered entries -> batches preserves identifier/payload/metadata")
+    @Test(
+        "queue export -> recovered entries -> batches preserves identifier/payload/metadata",
+        .tags(.lgr4, .lgr10)
+    )
     func endToEndExportToBatches() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -226,7 +249,10 @@ extension BatchEngineTests {
 // MARK: - recoverEntries: empty export
 
 extension BatchEngineTests {
-    @Test("empty export produces no entries, no batches, and no acknowledgement side effect")
+    @Test(
+        "empty export produces no entries, no batches, and no acknowledgement side effect",
+        .tags(.lgr11)
+    )
     func emptyExportProducesNoBatches() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -262,7 +288,10 @@ extension BatchEngineTests {
 // MARK: - recoverEntries: malformed export bytes
 
 extension BatchEngineTests {
-    @Test("malformed envelope JSON surfaces .envelopeMalformed")
+    @Test(
+        "malformed envelope JSON surfaces .envelopeMalformed",
+        .tags(.lgr10)
+    )
     func malformedEnvelopeRejected() throws {
         let bytes = Data("not-json\n".utf8)
         do {
@@ -273,7 +302,10 @@ extension BatchEngineTests {
         }
     }
 
-    @Test("envelope payload that is not valid base64 surfaces .recordPayloadBase64Invalid")
+    @Test(
+        "envelope payload that is not valid base64 surfaces .recordPayloadBase64Invalid",
+        .tags(.lgr10)
+    )
     func envelopeWithNonBase64PayloadRejected() throws {
         // Envelope-shape JSON whose `payload` field is present but
         // whose value cannot be base64-decoded. The `contentType`
@@ -292,7 +324,10 @@ extension BatchEngineTests {
         }
     }
 
-    @Test("envelope payload decoding to non-JSON bytes surfaces .recordPayloadMalformed")
+    @Test(
+        "envelope payload decoding to non-JSON bytes surfaces .recordPayloadMalformed",
+        .tags(.lgr10)
+    )
     func envelopeWithNonJSONRecordPayloadRejected() throws {
         let base64 = Data([0xFF, 0xFE]).base64EncodedString()
         let contentType = DurableRemoteQueue.envelopeContentType
@@ -306,7 +341,10 @@ extension BatchEngineTests {
         }
     }
 
-    @Test("envelope with a foreign contentType surfaces .envelopeContentTypeMismatch")
+    @Test(
+        "envelope with a foreign contentType surfaces .envelopeContentTypeMismatch",
+        .tags(.lgr10)
+    )
     func envelopeWithForeignContentTypeRejected() throws {
         // Hand-rolled envelope JSON carrying a contentType the
         // queue does not produce. The parser must refuse it
@@ -333,7 +371,10 @@ extension BatchEngineTests {
 // MARK: - recoverEntries: byteCount cross-check
 
 extension BatchEngineTests {
-    @Test("recoverEntries surfaces .exportByteCountMismatch when batch byteCount disagrees with the export file")
+    @Test(
+        "recoverEntries surfaces .exportByteCountMismatch when batch byteCount disagrees with the export file",
+        .tags(.lgr10)
+    )
     func batchByteCountMismatchRejected() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -367,7 +408,10 @@ extension BatchEngineTests {
 // MARK: - recoverEntries: framing rules
 
 extension BatchEngineTests {
-    @Test("empty export bytes parse to no entries")
+    @Test(
+        "empty export bytes parse to no entries",
+        .tags(.lgr10)
+    )
     func emptyBytesParseToNoEntries() async throws {
         let entries = try BatchEngine.recoverEntries(from: Data())
         #expect(entries.isEmpty)
@@ -378,7 +422,10 @@ extension BatchEngineTests {
         #expect(validEmptyExport == Data())
     }
 
-    @Test("a single bare newline is rejected as an empty line")
+    @Test(
+        "a single bare newline is rejected as an empty line",
+        .tags(.lgr10)
+    )
     func bareNewlineRejected() throws {
         let bytes = Data([0x0A])
         do {
@@ -389,7 +436,10 @@ extension BatchEngineTests {
         }
     }
 
-    @Test("a blank line between two valid records is rejected fail-closed")
+    @Test(
+        "a blank line between two valid records is rejected fail-closed",
+        .tags(.lgr10)
+    )
     func blankLineInMiddleRejected() async throws {
         // Drain a real queue with TWO records so each per-line
         // decode succeeds and the parser actually walks past the
@@ -410,7 +460,10 @@ extension BatchEngineTests {
         }
     }
 
-    @Test("a last JSON line missing its trailing LF is rejected fail-closed")
+    @Test(
+        "a last JSON line missing its trailing LF is rejected fail-closed",
+        .tags(.lgr10)
+    )
     func lastLineMissingLFRejected() async throws {
         // Drain a real queue and drop the trailing `0x0A` so the
         // parser sees a non-empty trailing chunk with no
@@ -430,7 +483,10 @@ extension BatchEngineTests {
 // MARK: - recoverEntries: formatVersion fail-closed
 
 extension BatchEngineTests {
-    @Test("record without a formatVersion field surfaces .recordFormatVersionMissing")
+    @Test(
+        "record without a formatVersion field surfaces .recordFormatVersionMissing",
+        .tags(.lgr10)
+    )
     func recordMissingFormatVersionRejected() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -471,7 +527,10 @@ extension BatchEngineTests {
         }
     }
 
-    @Test("record with an unknown formatVersion surfaces .recordFormatVersionUnsupported")
+    @Test(
+        "record with an unknown formatVersion surfaces .recordFormatVersionUnsupported",
+        .tags(.lgr10)
+    )
     func recordWithUnknownFormatVersionRejected() async throws {
         let directory = Self.uniqueDirectory()
         defer { Self.cleanup(directory) }
@@ -513,7 +572,10 @@ extension BatchEngineTests {
         }
     }
 
-    @Test("record with a formatVersion above UInt8.max still surfaces .recordFormatVersionUnsupported")
+    @Test(
+        "record with a formatVersion above UInt8.max still surfaces .recordFormatVersionUnsupported",
+        .tags(.lgr10)
+    )
     func recordWithAboveUInt8FormatVersionRejected() async throws {
         // Pin the diagnostic taxonomy: an integer outside the
         // current `UInt8` schema-version space must still classify
