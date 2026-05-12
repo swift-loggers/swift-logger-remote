@@ -10,13 +10,14 @@ Persistence/file-format contracts live in
 
 ## Current Scope
 
-Current scope is contract value types (PR 1/N) plus a minimal
-persistence-backed durable queue core (PR 2/N): enqueue,
-byte-stable export drain, and an in-memory acknowledgement boundary
-captured after successful drain and prepared for destructive removal
-after the future delivery loop classifies a batch as successfully
-delivered, without retaining adapter-owned acknowledgement state.
-Batching engine, retry scheduler, flush / lifecycle observer, real
+Current scope is contract value types (PR 1/N), a minimal
+persistence-backed durable queue core (PR 2/N), and engine-internal
+batching machinery that recovers entries from a drained queue
+export and splits them into deterministic batches under
+``RemoteBatchPolicy`` (M3.4 PR 3/N). The batching engine has no public
+surface beyond the existing ``RemoteBatchPolicy`` value type; its
+parser and batcher are internal machinery the future delivery
+loop drives. Retry scheduler, flush / lifecycle observer, real
 `RemoteTransport` dispatch, and the `swift-logger-elastic`
 migration ship in later PRs.
 
@@ -74,7 +75,6 @@ touches the persistence layer. Internally it owns a
 public actor DurableRemoteQueue {
     public init(
         directory: URL,
-        contentType: String = "application/vnd.swift-loggers.remote-queue+json",
         rotation: RotationPolicy = .never
     )
 
@@ -113,7 +113,13 @@ public enum DurableRemoteQueueError: Error, Sendable, Equatable {
 }
 ```
 
-Current PR 2/N scope is intentionally narrow:
+The persistence envelope's `contentType` is queue-owned (locked
+as a queue-internal constant) so the batching engine's parser can
+validate every recovered envelope fail-closed against the same
+constant. Caller-customizable content types would let the parser
+silently accept envelopes the queue did not produce.
+
+The queue scope remains intentionally narrow:
 
 - The queue never exposes a `retention` parameter. Persistence
   retention (`.maxSegments`, `.maxTotalBytes`, `.maxAge`) could
@@ -137,16 +143,16 @@ Current PR 2/N scope is intentionally narrow:
   rather than reporting `0`.
 - ``DurableRemoteQueue/drain(to:)`` writes a byte-stable export
   whose payload bytes are queue records, not raw transport input.
-  The future delivery loop's parser recovers the original
+  The engine-internal ``BatchEngine`` parser recovers the original
   ``RemoteDeliveryEntry`` (identifier + payload + metadata) from
-  the queue record. The queue ships no envelope parser in this
-  scope and exposes no replay/query API; envelope parsing is a
-  delivery-loop concern.
+  the queue record. The queue itself ships no envelope parser and
+  exposes no replay/query API; envelope parsing is a
+  ``BatchEngine`` concern.
 - Every persisted queue record carries an explicit
   `formatVersion: UInt8` schema-evolution anchor (initial value
-  `1`). The future delivery loop's parser MUST inspect this
+  `1`). The engine-internal ``BatchEngine`` parser MUST inspect this
   queue-record field before decoding any other queue-record field and
-  refuse to interpret an unknown version fail-closed rather than
+  MUST refuse to interpret an unknown version fail-closed rather than
   treating new fields as missing.
   Adding new fields to the record requires a `formatVersion` bump
   in the same commit for persisted queue-record compatibility.
@@ -157,6 +163,46 @@ Current PR 2/N scope is intentionally narrow:
   rotate the queue to a fresh directory. The persistence layer
   reserves `sequence == 0` for accepted envelopes and rejects it
   during envelope validation.
+
+## Batching Engine (engine-internal)
+
+The batching engine is engine-internal machinery the future
+delivery loop drives. Its public surface is the existing
+``RemoteBatchPolicy`` value type; the parser and the batcher are
+both `internal` and reached through `@testable import` in the
+test target. PR 3/N intentionally adds no new public types
+because the queue surface (PR 2/N) and the batch-policy value
+type (PR 1/N) already carry the public contract.
+
+Two pure steps drive one drained queue export:
+
+1. **`BatchEngine.recoverEntries(from:)`** parses a
+   ``DurableRemoteQueueBatch`` (or its export bytes) into an
+   ordered array of ``RemoteDeliveryEntry``. Each line's envelope
+   `contentType` is validated against the queue-owned constant
+   before its `payload` is treated as queue-record bytes; a
+   foreign envelope is refused fail-closed
+   (``BatchEngineError/envelopeContentTypeMismatch(expected:found:)``).
+   The parser then preserves accepted ordering from the byte-stable
+   queue export and duplicate-identifier multiplicity verbatim,
+   and inspects each queue record's
+   ``DurableRemoteQueueRecord/formatVersion`` schema-evolution
+   anchor before decoding any other queue-record field. A missing
+   or unknown version is refused fail-closed
+   (``BatchEngineError/recordFormatVersionMissing`` or
+   ``BatchEngineError/recordFormatVersionUnsupported(found:supported:)``).
+2. **`BatchEngine.makeBatches(from:policy:)`** splits the entry
+   stream into ordered batches under ``RemoteBatchPolicy``:
+   equal-to-cap fits in the current batch and strictly-greater
+   starts the next; an oversized single entry whose payload alone
+   exceeds the byte cap surfaces
+   ``RemoteDeliveryError/batchSizeExceeded(limit:actual:)`` from
+   the existing boundary helper, not as a perpetual boundary.
+
+The engine never deduplicates, sorts, or classifies entries; it
+never calls ``DurableRemoteQueue/acknowledge()`` and never
+performs any destructive removal. Retry scheduling, lifecycle
+hooks, and real ``RemoteTransport`` dispatch ship in later PRs.
 
 ## Contract Value Types
 
@@ -283,7 +329,7 @@ HTTP-backed adapter family lands in M5.
   Dynatrace OneAgent) — those bypass this engine by design.
 - No tags or releases.
 
-## Deferred -- Flush Lifecycle
+## Deferred: Flush Lifecycle
 
 A flush-lifecycle vocabulary (e.g. opportunistic / lifecycle-driven /
 manual) is intentionally deferred. Naming a `RemoteFlushPolicy.onLifecycle`
@@ -296,7 +342,7 @@ together with the engine loop in a later M3.4 milestone.
 
 | Milestone | Scope |
 | --- | --- |
-| M3.4 PR 3/N | Batching engine only: deterministic batch construction, entry/byte caps, oversized-entry behavior. No retry scheduler, no real transport dispatch; test-only fixtures for batch proof. |
+| M3.4 PR 3/N (this milestone) | Batching engine only: deterministic batch construction, entry/byte caps, oversized-entry behavior, byte-stable export → entry-stream parser with fail-closed `formatVersion` validation. No retry scheduler, no real transport dispatch; engine-internal machinery. |
 | M3.4 PR 4/N | Retry scheduler / execution loop: retry policy execution, backoff progression, attempt accounting, terminal vs retryable routing. Test-only transport fixture explicitly marked as such, not public API. |
 | M3.4 PR 5/N | Flush trigger semantics, lifecycle hook surface, `RemoteTransport` dispatch integration, acknowledgement-to-removal lifecycle, final docs / coverage / CI closure for M3.4. |
 | M3.5 | Migrate `swift-logger-elastic` onto this engine; Elastic-specific code stays in the adapter (ECS encoder, `_bulk` request builder, `_bulk` response validator). |

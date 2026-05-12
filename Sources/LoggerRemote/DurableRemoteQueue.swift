@@ -32,8 +32,16 @@ import LoggerPersistence
 /// of scope for this milestone and ship with the engine delivery
 /// loop.
 public actor DurableRemoteQueue {
+    /// Queue-owned constant `contentType` value recorded on every
+    /// persisted envelope. Locked as queue-internal so the
+    /// batching engine's parser can validate envelopes it
+    /// recovers fail-closed against the same constant. The value
+    /// satisfies the persistence layer's content-type validation
+    /// (visible ASCII, no whitespace, 1...128 UTF-8 bytes).
+    internal static let envelopeContentType =
+        "application/vnd.swift-loggers.remote-queue+json"
+
     private let store: FileLogStore
-    private let contentType: String
     private let recordEncoder: JSONEncoder
     private var nextSequence: UInt64
     private var outstandingBatch: DurableRemoteQueueBatch?
@@ -60,12 +68,16 @@ public actor DurableRemoteQueue {
     ///   - directory: Configured persistence root. Path-confinement
     ///     and ancestor-symlink ownership are the caller's
     ///     responsibility per the persistence package contract.
-    ///   - contentType: `contentType` recorded on each persisted
-    ///     envelope. Must satisfy the persistence layer's
-    ///     content-type validation (visible ASCII, no whitespace
-    ///     or control characters, 1...128 UTF-8 bytes).
     ///   - rotation: Segment-rotation policy forwarded to the
     ///     persistence layer.
+    ///
+    /// The queue intentionally does not expose a `contentType`
+    /// parameter. The persistence envelope's `contentType` is
+    /// queue-owned (locked as a queue-internal constant) so the
+    /// batching engine's parser can validate every recovered
+    /// envelope fail-closed against the same constant; caller-
+    /// customizable content types would let the parser silently
+    /// accept envelopes the queue did not produce.
     ///
     /// The queue intentionally does not expose a `retention`
     /// parameter. Persistence retention (`.maxSegments`,
@@ -77,12 +89,10 @@ public actor DurableRemoteQueue {
     /// retention.
     public init(
         directory: URL,
-        contentType: String = "application/vnd.swift-loggers.remote-queue+json",
         rotation: RotationPolicy = .never
     ) {
         self.init(
             directory: directory,
-            contentType: contentType,
             rotation: rotation,
             startingSequence: 1
         )
@@ -93,11 +103,9 @@ public actor DurableRemoteQueue {
     /// which starts at `1`.
     internal init(
         directory: URL,
-        contentType: String,
         rotation: RotationPolicy,
         startingSequence: UInt64
     ) {
-        self.contentType = contentType
         store = FileLogStore(configuration: .init(
             directory: directory,
             rotation: rotation,
@@ -127,10 +135,10 @@ public actor DurableRemoteQueue {
     public func enqueue(
         _ entry: RemoteDeliveryEntry
     ) async throws(DurableRemoteQueueError) {
-        // Reserve the persistence sequence before the I/O so the
-        // exhaustion guard runs first. The allocator never wraps
-        // to `0`; an exhausted allocator surfaces `.sequenceExhausted`
-        // and the queue must be rotated to a fresh directory.
+        // Reserve the persistence sequence before the I/O so an
+        // allocator already marked exhausted (`0`) fails before any
+        // bytes are admitted. Exhaustion after `UInt64.max` is
+        // detected on the next reservation attempt.
         guard nextSequence != 0 else {
             throw .sequenceExhausted
         }
@@ -157,7 +165,7 @@ public actor DurableRemoteQueue {
                 id: UUID(),
                 sequence: reservedSequence,
                 createdAt: Self.millisecondAlignedNow(),
-                contentType: contentType,
+                contentType: Self.envelopeContentType,
                 hints: [:],
                 payload: recordBytes
             )
@@ -171,8 +179,14 @@ public actor DurableRemoteQueue {
         }
         // Advance the allocator only after a successful admission
         // so a rejected envelope or failed append leaves the next
-        // sequence unchanged. `UInt64.max + 1` wraps to `0`, which
-        // the exhaustion guard above catches on the next call.
+        // sequence unchanged. `&+=` is used intentionally: at
+        // `UInt64.max` the operator wraps the allocator to `0`,
+        // and the exhaustion guard at the top of the next
+        // ``enqueue(_:)`` is what catches the wrapped value and
+        // surfaces ``DurableRemoteQueueError/sequenceExhausted``.
+        // This is a deliberate two-step contract (`&+=` here +
+        // guard there), not implicit reliance on Swift's general
+        // wrapping-addition semantics anywhere else.
         nextSequence &+= 1
     }
 
@@ -216,10 +230,12 @@ public actor DurableRemoteQueue {
         }
         // The persistence in-memory removal boundary is set by the
         // successful `exportLogs(to:)`. From here on a queue-side
-        // failure leaves the queue without an `outstandingBatch`,
-        // so `acknowledge()` must refuse the destructive remove
-        // even though the persistence boundary may still exist
-        // — see the queue-held-batch guard in `acknowledge()`.
+        // failure leaves the queue without a queue-held outstanding
+        // batch reference: the persistence boundary may still
+        // exist, but the queue neither holds it nor handed it to
+        // the caller. `acknowledge()` must refuse the destructive
+        // remove in that state — see the queue-held-batch guard
+        // in `acknowledge()`.
         let byteCount: UInt64
         if let override = exportSizeReaderForTesting {
             do {
@@ -275,12 +291,14 @@ public actor DurableRemoteQueue {
     /// surface stays narrow.
     ///
     /// This is actor-local in-memory state for retrying
-    /// ``acknowledge()`` against a drained batch **within the same
-    /// process**. It is not crash-recovery state — a process
-    /// restart loses the in-memory batch reference and the queue
-    /// has no replay/query API to rebuild it. The future delivery
-    /// loop consumes this value only for in-process retry against
-    /// the captured persistence boundary.
+    /// ``acknowledge()`` against a drained batch **while the actor
+    /// instance remains alive**. It is not crash-recovery state
+    /// and not durable across actor-instance lifetime: deallocating
+    /// or rebuilding the actor loses the in-memory batch
+    /// reference, and the queue has no replay/query API to
+    /// rebuild it. The future delivery loop consumes this value
+    /// only for in-actor retry against the captured persistence
+    /// boundary.
     internal func currentOutstandingBatch() -> DurableRemoteQueueBatch? {
         outstandingBatch
     }
@@ -341,11 +359,23 @@ public actor DurableRemoteQueue {
         guard let size = attrs[.size] as? NSNumber else {
             throw .drainSizeReadFailed
         }
-        // Read the signed value first; a negative `.size` is a
-        // malformed attribute (e.g. corrupt filesystem snapshot)
-        // and must not silently round-trip through `UInt64` as a
-        // ~ `UInt64.max` value.
-        let signed = size.int64Value
+        // Extract the value as `Int64` via `CFNumberGetValue`,
+        // which returns `false` when the stored value cannot be
+        // represented exactly in the requested type. Plain
+        // `NSNumber.int64Value` would silently coerce an
+        // oversized or malformed numeric representation; the
+        // checked extraction surfaces that as
+        // `.drainSizeReadFailed` instead.
+        var signed: Int64 = 0
+        let extracted = CFNumberGetValue(
+            size as CFNumber, .sInt64Type, &signed
+        )
+        guard extracted else {
+            throw .drainSizeReadFailed
+        }
+        // Reject negative values explicitly so a malformed `.size`
+        // (e.g. corrupt filesystem snapshot) does not round-trip
+        // through `UInt64` as a ~`UInt64.max` byte count.
         guard signed >= 0 else {
             throw .drainSizeReadFailed
         }
