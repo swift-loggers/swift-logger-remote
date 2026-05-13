@@ -32,6 +32,10 @@ extension RemoteDeliveryContractTests {
         let response: any Sendable = RemoteTransportResponse(
             responseBytes: Data()
         )
+        let batchItem: any Sendable = RemoteTransportBatchItem(
+            payloadBytes: Data([0x01]),
+            payloadMetadata: ["sink": "example"]
+        )
         let error: any Sendable = RemoteDeliveryError.batchEmpty
         let summary: any Sendable = RemoteFlushSummary(
             attemptedBatches: 0,
@@ -64,6 +68,7 @@ extension RemoteDeliveryContractTests {
         #expect(retry is RemoteRetryPolicy)
         #expect(batch is RemoteBatchPolicy)
         #expect(response is RemoteTransportResponse)
+        #expect(batchItem is RemoteTransportBatchItem)
         #expect(error is RemoteDeliveryError)
         #expect(summary is RemoteFlushSummary)
         #expect(acknowledgement is RemoteFlushAcknowledgement)
@@ -75,6 +80,27 @@ extension RemoteDeliveryContractTests {
     }
 
     // swiftlint:enable function_body_length
+
+    @Test(
+        "Engine-internal contract types are Sendable",
+        .tags(.lgr3, .lgr5, .lgr7)
+    )
+    func internalEngineContractTypesAreSendable() {
+        // `BatchDeliveryError` and `ExecutionLoopError` are
+        // engine-internal but locked diagnostic surfaces the
+        // batch-round dispatcher and the one-shot execution loop
+        // raise. They reach the test target through
+        // `@testable import` and MUST satisfy the existential
+        // `Sendable` requirement so engine code can throw them
+        // across the actor boundary `RemoteEngine.flush()` runs on
+        // without `Sendable`-conformance noise.
+        let batchDeliveryError: any Sendable = BatchDeliveryError
+            .sleepInterrupted
+        let executionLoopError: any Sendable = ExecutionLoopError
+            .sleepInterrupted
+        #expect(batchDeliveryError is BatchDeliveryError)
+        #expect(executionLoopError is ExecutionLoopError)
+    }
 }
 
 // MARK: - Public engine surface Equatable shape
@@ -157,6 +183,58 @@ extension RemoteDeliveryContractTests {
         #expect(
             RemoteEngineError.acknowledgementFailed(.batchAlreadyOutstanding)
                 == RemoteEngineError.acknowledgementFailed(.batchAlreadyOutstanding)
+        )
+        // `batchFailed` carries a `RemoteDeliveryError` verbatim;
+        // identical inner cases compare equal, distinct inner
+        // cases compare unequal.
+        #expect(
+            RemoteEngineError.batchFailed(.invalidBatchState)
+                == RemoteEngineError.batchFailed(.invalidBatchState)
+        )
+        #expect(
+            RemoteEngineError.batchFailed(.invalidBatchState)
+                != RemoteEngineError.batchFailed(
+                    .batchSizeExceeded(limit: 1, actual: 2)
+                )
+        )
+        // `transportBatchInvalid` carries `expected` / `actual`
+        // verbatim; both fields participate in equality.
+        #expect(
+            RemoteEngineError.transportBatchInvalid(expected: 5, actual: 4)
+                == RemoteEngineError.transportBatchInvalid(expected: 5, actual: 4)
+        )
+        #expect(
+            RemoteEngineError.transportBatchInvalid(expected: 5, actual: 4)
+                != RemoteEngineError.transportBatchInvalid(expected: 5, actual: 3)
+        )
+        #expect(
+            RemoteEngineError.transportBatchInvalid(expected: 5, actual: 4)
+                != RemoteEngineError.transportBatchInvalid(expected: 6, actual: 4)
+        )
+
+        // RemoteTransportBatchItem: every stored field participates
+        // in equality so per-item correlation between adapter
+        // input and adapter output is round-trip-stable.
+        let leftItem = RemoteTransportBatchItem(
+            payloadBytes: Data([0x01, 0x02]),
+            payloadMetadata: ["sink": "example"]
+        )
+        let sameItem = RemoteTransportBatchItem(
+            payloadBytes: Data([0x01, 0x02]),
+            payloadMetadata: ["sink": "example"]
+        )
+        #expect(leftItem == sameItem)
+        #expect(
+            leftItem != RemoteTransportBatchItem(
+                payloadBytes: Data([0x01]),
+                payloadMetadata: ["sink": "example"]
+            )
+        )
+        #expect(
+            leftItem != RemoteTransportBatchItem(
+                payloadBytes: Data([0x01, 0x02]),
+                payloadMetadata: ["sink": "other"]
+            )
         )
 
         // RemoteEngineParseError: associated-value mirroring

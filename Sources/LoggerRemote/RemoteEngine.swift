@@ -26,22 +26,33 @@ import Foundation
 ///      and then ``DurableRemoteQueue/drain(to:)`` into a fresh
 ///      scratch file inside the engine-owned `exportDirectory`.
 /// 2. Drives the engine-internal
-///    `ExecutionLoop.deliver(batch:batchPolicy:retryPolicy:transport:sleep:)`
+///    `ExecutionLoop.deliver(batch:...)`
 ///    helper over the captured batch:
 ///    `BatchEngine.recoverEntries(from:)` →
-///    `BatchEngine.makeBatches(from:policy:)` → per-entry
-///    `RetryExecutor.deliver(entry:transport:policy:sleep:delayCalculator:)`.
+///    `BatchEngine.makeBatches(from:policy:)` → per-group
+///    batch-round dispatch against
+///    ``RemoteTransport/sendBatch(_:)`` with per-entry
+///    classification through ``RemoteTransport/classify(_:)``.
+///    Round 1 of each group contains every entry; every
+///    subsequent round re-dispatches only the entries whose
+///    previous classification was
+///    ``RemoteDeliveryResult/retryable(reason:)``. Per-entry
+///    attempt counts equal the number of rounds the entry was
+///    active in. The sleep injector is invoked between rounds
+///    only when at least one retryable entry remains.
 /// 3. Aggregates per-entry outcomes into a
 ///    ``RemoteFlushSummary``.
 /// 4. **Acknowledgement decision** (LGR-11): the engine invokes
 ///    ``DurableRemoteQueue/acknowledge()`` only when every recovered
-///    entry reached a resolved classification —
-///    ``RemoteDeliveryResult/success`` or
+///    entry across the entire flush pass reached a resolved
+///    classification — ``RemoteDeliveryResult/success`` or
 ///    ``RemoteDeliveryResult/terminal(reason:)``. A single
-///    ``RemoteDeliveryResult/retryable(reason:)`` outcome (the
-///    per-entry budget exhausted without resolution) keeps the
-///    drained batch held so the next ``flush()`` retries the same
-///    bytes through the outstanding-reuse path.
+///    ``RemoteDeliveryResult/retryable(reason:)`` outcome anywhere
+///    in the pass (the per-entry retry budget exhausted without
+///    resolution) keeps the drained batch held so the next
+///    ``flush()`` retries the same bytes through the
+///    outstanding-reuse path. There is **no per-batch
+///    acknowledgement**: ACK is a pass-wide decision.
 ///    ``RemoteDeliveryResult/terminal(reason:)`` is treated as
 ///    resolved because the classifier — sink-owned (LGR-7,
 ///    LGR-9) — declared the entry permanently failed; removing
@@ -57,11 +68,17 @@ import Foundation
 /// removed because none existed.
 ///
 /// The engine surface is sink-neutral. ``RemoteTransport`` owns
-/// both ``RemoteTransport/send(payloadBytes:payloadMetadata:)`` and
+/// both ``RemoteTransport/sendBatch(_:)`` and
 /// ``RemoteTransport/classify(_:)``; the engine itself never
 /// inspects HTTP status, vendor body codes, or transport error
-/// types. Vendor-specific encoders, request builders, and response
-/// classifiers live in adapter packages (LGR-9).
+/// types. Single-event adapters (Splunk HEC, Loki single-event,
+/// Datadog Logs HTTP intake) implement
+/// ``RemoteTransport/sendBatch(_:)`` by dispatching each input
+/// item independently. Batch-aggregating adapters (Elastic
+/// `_bulk`, OTLP/HTTP batched) build one vendor request from the
+/// whole batch and project the response back into per-input
+/// results. Vendor-specific encoders, request builders, and
+/// response classifiers live in adapter packages (LGR-9).
 public actor RemoteEngine {
     private let queue: DurableRemoteQueue
     private let exportDirectory: URL
@@ -124,13 +141,14 @@ public actor RemoteEngine {
     ///     exclusive working area; callers should not co-locate
     ///     other files there.
     ///   - transport: Sink-neutral transport conformer. Adapters
-    ///     implement ``RemoteTransport/send(payloadBytes:payloadMetadata:)``
-    ///     and ``RemoteTransport/classify(_:)``; the engine never
+    ///     implement ``RemoteTransport/sendBatch(_:)`` and
+    ///     ``RemoteTransport/classify(_:)``; the engine never
     ///     interprets either result.
     ///   - batchPolicy: Validated boundary contract consumed by
     ///     `BatchEngine.makeBatches(from:policy:)`.
     ///   - retryPolicy: Validated per-entry retry budget +
-    ///     backoff schedule consumed by `RetryExecutor`.
+    ///     backoff schedule consumed by the batch-round
+    ///     dispatcher inside `ExecutionLoop`.
     public init(
         queue: DurableRemoteQueue,
         exportDirectory: URL,
@@ -488,7 +506,7 @@ public actor RemoteEngine {
 
     // swiftlint:enable identifier_name
 
-    /// Drives the engine-internal ``ExecutionLoop/deliver(batch:batchPolicy:retryPolicy:transport:sleep:)``
+    /// Drives the engine-internal `ExecutionLoop.deliver(batch:...)`
     /// helper over the captured non-empty batch. Failures after
     /// this point keep the queue's outstanding boundary held and
     /// the export artifact on disk so the next flush can reuse
@@ -539,14 +557,14 @@ public actor RemoteEngine {
     }
 
     /// Public-side translation of the narrow
-    /// ``ExecutionLoop/deliver(batch:batchPolicy:retryPolicy:transport:sleep:)``
+    /// `ExecutionLoop.deliver(batch:...)`
     /// engine-internal error surface
     /// (``BatchDeliveryError``) into ``RemoteEngineError`` so the
     /// internal types stay out of the public surface. Exhaustive
-    /// over the four cases the helper can raise; the broader
+    /// over the six cases the helper can raise; the broader
     /// ``ExecutionLoopError`` surface (which also carries drain /
     /// empty-release cases) only flows through
-    /// ``ExecutionLoop/runOnce(...)`` and never reaches this
+    /// `ExecutionLoop.runOnce(...)` and never reaches this
     /// mapper.
     private static func mapDeliverError(
         _ error: BatchDeliveryError
@@ -560,6 +578,12 @@ public actor RemoteEngine {
             return .retryInterrupted(.invalidRetryDelay(deliveryError))
         case .sleepInterrupted:
             return .retryInterrupted(.sleepInterrupted)
+        case .internalBatchStateInvalid:
+            return .batchFailed(.invalidBatchState)
+        case let .transportBatchCountMismatch(expected, actual):
+            return .transportBatchInvalid(
+                expected: expected, actual: actual
+            )
         }
     }
 

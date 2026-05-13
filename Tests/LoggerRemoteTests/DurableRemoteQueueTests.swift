@@ -6,10 +6,10 @@ import Testing
 
 /// Coverage for the persistence-backed durable queue core (LGR-10,
 /// LGR-11 enqueue/drain/acknowledge boundary). Batching and
-/// retry execution live in `BatchEngineTests` / `RetryExecutorTests`
-/// / `ExecutionLoopTests`; the public flush lifecycle that ties
-/// drain / dispatch / acknowledge together lives in
-/// `RemoteEngineTests`.
+/// batch-round dispatch live in `BatchEngineTests` /
+/// `BatchDispatchTests` / `ExecutionLoopTests`; the public flush
+/// lifecycle that ties drain / dispatch / acknowledge together
+/// lives in `RemoteEngineTests`.
 @Suite("DurableRemoteQueue persistence-backed core")
 struct DurableRemoteQueueTests {
     private static func uniqueDirectory() -> URL {

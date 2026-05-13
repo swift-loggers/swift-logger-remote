@@ -11,24 +11,36 @@ at the released `0.1.x` SemVer line via
 export from the persistence layer exclusively through
 ``DurableRemoteQueue``. Destructive removal of accepted bytes from
 the persistence layer runs only after the engine acknowledges a
-successfully drained batch (LGR-11).
+fully-resolved non-empty flush pass (LGR-11).
 
 ## Status
 
-Pre-release durable remote-delivery engine package, M3.4 complete.
-The core contract surfaces are locked, the persistence-backed
+`0.1.0` establishes the public durable remote-delivery engine
+surface for the `0.1.x` line. M3.4 is complete: the core contract
+surfaces are locked, the persistence-backed
 ``DurableRemoteQueue`` core is in place, engine-internal
 ``BatchEngine`` machinery recovers entries from a drained queue
 export and splits them into deterministic batches under
-``RemoteBatchPolicy``, an engine-internal retry / execution loop
-(``RetryExecutor`` / ``ExecutionLoop``) drives the per-entry retry
-budget under ``RemoteRetryPolicy``, and the public
-``RemoteEngine`` actor wraps that loop with the caller-driven
-``flush()`` surface, the acknowledgement-to-removal lifecycle
-closure for non-empty flush passes, and the
-``RemoteTransport/classify(_:)`` sink-owned classification hook.
-Concrete vendor adapters (Elastic `_bulk`, Splunk HEC, …) and
-tagged releases ship in later milestones.
+``RemoteBatchPolicy``, the engine-internal ``ExecutionLoop``
+drives delivery as **batch rounds** against
+``RemoteTransport.sendBatch(_:)`` as the sole transport dispatch
+primitive (one ordered ``sendBatch(_:)`` invocation per round
+against the retained active-set; the retained active-set carries
+only the entries whose previous classification was retryable
+from the previous round, preserving their original input
+ordering; the ``RemoteRetryPolicy`` budget is tracked per entry
+across batch rounds for the lifetime of the flush pass,
+advancing one attempt for each entry that stays in the
+active-set per round), and the public ``RemoteEngine`` actor
+wraps that loop with the caller-driven ``flush()`` surface, the
+acknowledgement-to-removal lifecycle closure for non-empty flush
+passes, and the ``RemoteTransport.classify(_:)`` sink-owned
+per-item classification hook for ``sendBatch(_:)`` results owned
+by the transport adapter (deterministic within a flush pass for
+the same transport result and adapter implementation, and that
+MUST NOT mutate acknowledgement or export-file lifecycle state
+directly or indirectly). Concrete vendor adapters (Elastic `_bulk`,
+Splunk HEC, …) ship as separate packages in later milestones.
 
 ## Queue envelope contract
 
@@ -37,28 +49,33 @@ as a queue-internal constant. Callers cannot customize it. The
 engine-internal ``BatchEngine`` validates the envelope
 `contentType` against the same constant fail-closed before
 decoding any queue records, so a foreign envelope (one the queue
-did not produce) is refused at recovery time rather than silently
-decoded as a malformed queue record. No deprecated `contentType:`
-initializer overload is kept: `swift-logger-remote` has no
-released tag yet, so the public API is being locked before the
-first release.
+did not produce for the queue-owned envelope `contentType` for
+the current queue format version) is refused at recovery time
+rather than silently decoded as a malformed queue record. `0.1.0` ships without a
+deprecated `contentType:` initializer overload; the public API is
+locked around the queue-owned envelope contract.
 
 ## Non-goals
 
-- No autonomous timer or scheduler. The engine is caller-driven:
-  hosts decide when to invoke ``RemoteEngine/flush()`` from their
-  own lifecycle hooks (`UIApplication` background notifications,
+- No autonomous timer or scheduler in the public engine surface.
+  Retry backoff still uses injected Swift concurrency sleep
+  primitives internally. The engine is caller-driven: hosts
+  decide when to invoke ``RemoteEngine/flush()`` from their own
+  lifecycle hooks (`UIApplication` background notifications,
   `NSWorkspace` power-off, shutdown signals, periodic tasks).
 - No concrete vendor adapter (Elastic `_bulk`, Splunk HEC, …) in
   this package. The engine dispatches through any
-  ``RemoteTransport`` conformer; concrete adapters ship in later
-  milestones. The current test coverage exercises the engine
-  through a test-only ``StubRemoteTransport`` fixture.
+  ``RemoteTransport`` conformer implementing the batch-round
+  transport contract through ``RemoteTransport.sendBatch(_:)`` as
+  the sole transport dispatch primitive that satisfies the
+  deterministic classification contract; concrete adapters ship
+  as separate packages in later milestones. `0.1.0` test coverage
+  exercises the engine through a test-only
+  ``StubRemoteTransport`` fixture.
 - No vendor-specific encoders, request builders, or response
   validators in the core engine — those live in adapter packages.
 - No Datadog/Splunk/Loki/Dynatrace adapter packages here.
 - No SDK-backed adapters (those bypass this engine by design).
-- No tags or releases yet.
 
 ## Documentation
 
