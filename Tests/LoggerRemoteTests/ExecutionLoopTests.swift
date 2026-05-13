@@ -26,9 +26,10 @@ struct ExecutionLoopTests {
 // MARK: - Test helpers
 
 extension ExecutionLoopTests {
-    /// Mirrors the per-entry retry classifier used by the
-    /// `RetryExecutor` suite so the integration tests share the
-    /// same sink-owned classification shape.
+    /// Shared sink-owned classifier used by the integration
+    /// tests in this file: response metadata `__test_class`
+    /// drives `.success` / `.retryable` / `.terminal`, and any
+    /// transport-level failure routes to `.retryable`.
     static let metadataClassifier:
         @Sendable (Result<RemoteTransportResponse, any Error>) async -> RemoteDeliveryResult = {
             switch $0 {
@@ -269,8 +270,15 @@ extension ExecutionLoopTests {
 // MARK: - Mixed outcomes within one batch
 
 extension ExecutionLoopTests {
+    // swiftlint:disable function_body_length
+    // Reason: One end-to-end pin of the batch-round dispatcher across
+    // three rounds (full group → single retryable → final round) with
+    // ordered per-round batch-call assertions, per-entry attempt
+    // counts, drained-export ordering, and inter-round sleep schedule;
+    // splitting would scatter the round-by-round invariant proof
+    // without adding coverage.
     @Test(
-        "mixed entries: per-entry budgets are independent and accepted ordering survives",
+        "mixed entries: per-entry budgets are independent across batch rounds and accepted ordering survives",
         .tags(.lgr3, .lgr4, .lgr5, .lgr10)
     )
     func mixedEntriesInOneBatch() async throws {
@@ -289,17 +297,22 @@ extension ExecutionLoopTests {
         let destination = try Self.makeExportURL()
         defer { Self.cleanup(destination.parent) }
 
-        // Per-entry transport script (per-entry retry budgets are
-        // independent in this PR):
-        //   entry 1: success on first attempt           (1 call)
-        //   entry 2: retryable → retryable → success    (3 calls)
-        //   entry 3: terminal on first attempt          (1 call)
+        // Batch-round transport script. The dispatcher walks
+        // active entries per round; outcomes are consumed in
+        // arrival order within each call:
+        //   Round 1: 3 items [e1, e2, e3] →
+        //     [success, retryable, terminal]
+        //     → e1 resolves, e2 stays retryable, e3 resolves.
+        //   Round 2: 1 item [e2] → [retryable]
+        //     → e2 stays retryable, budget allows another round.
+        //   Round 3: 1 item [e2] → [success]
+        //     → e2 resolves; dispatcher exits.
         let transport = Self.makeStubTransport(outcomes: [
             .response(Self.successResponse()),
             .response(Self.retryableResponse()),
+            .response(Self.terminalResponse()),
             .response(Self.retryableResponse()),
-            .response(Self.successResponse()),
-            .response(Self.terminalResponse())
+            .response(Self.successResponse())
         ])
         let recorder = SleepRecorder()
 
@@ -313,29 +326,42 @@ extension ExecutionLoopTests {
         )
 
         #expect(attempts.count == 3)
+        // Returned attempts preserve the drained-export order
+        // regardless of round-shrink dynamics.
         #expect(attempts.map(\.entry.identifier) == [1, 2, 3])
         #expect(attempts[0].outcome == .success)
         #expect(attempts[0].attempts == 1)
         #expect(attempts[1].outcome == .success)
+        // Entry 2 participated in rounds 1, 2, and 3.
         #expect(attempts[1].attempts == 3)
         #expect(attempts[2].outcome == .terminal(reason: .transportRejected))
+        // Entry 3 resolved on round 1 with a terminal outcome.
         #expect(attempts[2].attempts == 1)
-        let calls = await transport.recordedCalls()
-        #expect(calls.count == 5)
-        // Per-entry dispatch order on the wire: entry 1 succeeds on
-        // its single call (one `0xA1`), entry 2 retries twice
-        // before success (three `0xA2`s in a row), entry 3
-        // terminates on its single call (one `0xA3`). The engine
-        // never aggregates entry bytes; each call carries exactly
-        // one entry's payload.
-        #expect(calls.map(\.payloadBytes) == [
-            Data([0xA1]), Data([0xA2]), Data([0xA2]), Data([0xA2]), Data([0xA3])
+        // The dispatcher issued three `sendBatch` calls — one per
+        // round — with the active subset shrinking from `[e1, e2,
+        // e3]` to `[e2]` to `[e2]`.
+        let batchCalls = await transport.recordedBatchCalls()
+        #expect(batchCalls.count == 3)
+        #expect(batchCalls[0].items.map(\.payloadBytes) == [
+            Data([0xA1]), Data([0xA2]), Data([0xA3])
         ])
-        // Only entry 2 produced retry sleeps (two of them); entries
-        // 1 and 3 stopped on their first attempt.
+        #expect(batchCalls[1].items.map(\.payloadBytes) == [Data([0xA2])])
+        #expect(batchCalls[2].items.map(\.payloadBytes) == [Data([0xA2])])
+        // Per-item flat view across the rounds.
+        let calls = await transport.recordedCalls()
+        #expect(calls.map(\.payloadBytes) == [
+            Data([0xA1]), Data([0xA2]), Data([0xA3]),
+            Data([0xA2]),
+            Data([0xA2])
+        ])
+        // Sleeps fire between rounds whenever the previous round
+        // left at least one retryable entry active: round 1 → 2
+        // and round 2 → 3.
         let sleeps = await recorder.recordedSleeps()
         #expect(sleeps == [0.05, 0.05])
     }
+
+    // swiftlint:enable function_body_length
 }
 
 // MARK: - Multi-batch traversal

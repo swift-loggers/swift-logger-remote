@@ -1,10 +1,11 @@
 /// Typed diagnostic surface for the engine-internal retry execution
 /// loop.
 ///
-/// Each case names the lifecycle step where the failure surfaced and
-/// carries the underlying layer-typed error (queue, batching engine,
-/// or batch-policy boundary) so the caller can recover the original
-/// diagnostic without parsing a string description. Sleep-injector
+/// Each case names the lifecycle step where the failure surfaced.
+/// Cases either carry the underlying layer-typed error or name an
+/// engine-side invariant / lifecycle failure directly. Internal
+/// batch-state invalidity marks engine-side invariant failure,
+/// not adapter transport invalidity. Sleep-injector
 /// failures (e.g. cooperative cancellation propagated from
 /// `Task.sleep(for:)`) surface as
 /// ``ExecutionLoopError/sleepInterrupted`` — the underlying error is
@@ -12,7 +13,7 @@
 /// sleep-injector failure as equivalent at this layer.
 ///
 /// The error is engine-internal. ``RemoteEngine/flush()`` is the
-/// only production caller; ``ExecutionLoop/runOnce(...)`` throws
+/// only production caller; `ExecutionLoop.runOnce(...)` throws
 /// this surface for the engine-internal lifecycle (drain +
 /// empty-release) that the engine wraps differently in
 /// production. The public translation lives on
@@ -26,7 +27,7 @@ internal enum ExecutionLoopError: Error, Sendable {
 
     /// Parsing the drained queue export into entries through
     /// `BatchEngine.recoverEntries(from:)` failed
-    /// fail-closed before any transport call could be made.
+    /// closed before any transport call could be made.
     case recoverFailed(BatchEngineError)
 
     /// Splitting the recovered entry stream into batches through
@@ -71,12 +72,28 @@ internal enum ExecutionLoopError: Error, Sendable {
     /// being masked as ``ExecutionLoopError/drainFailed(_:)``.
     case emptyBatchReleaseFailed(DurableRemoteQueueError)
 
-    /// The sleep injector threw between two retryable attempts.
-    /// Treated as an opaque interruption at this layer; the engine
-    /// layer above (``RemoteEngine/flush()``) decides whether to
-    /// retry the drained batch on the next caller-driven flush
-    /// through the outstanding-reuse path.
+    /// The sleep injector threw between two batch dispatch
+    /// rounds. Treated as an opaque interruption at this layer;
+    /// the engine layer above (``RemoteEngine/flush()``) decides
+    /// whether to retry the drained batch on the next
+    /// caller-driven flush through the outstanding-reuse path.
     case sleepInterrupted
+
+    /// The batch-round dispatcher reached a state that should be
+    /// unreachable from validated inputs: at least one entry had
+    /// no recorded outcome after dispatch rounds completed. This
+    /// signals an engine-side active-set / outcome-tracking defect,
+    /// not an adapter transport contract violation.
+    case internalBatchStateInvalid
+
+    /// ``RemoteTransport/sendBatch(_:)`` returned a result array
+    /// whose count does not match the number of items the engine
+    /// handed it. The engine fails closed rather than guessing
+    /// which entries the surplus or missing results refer to.
+    /// `expected` is the input item count the engine handed
+    /// to ``RemoteTransport/sendBatch(_:)``; `actual` is the
+    /// returned result count.
+    case transportBatchCountMismatch(expected: Int, actual: Int)
 }
 
 extension ExecutionLoopError: Equatable {
@@ -98,6 +115,13 @@ extension ExecutionLoopError: Equatable {
             return left == right
         case (.sleepInterrupted, .sleepInterrupted):
             return true
+        case (.internalBatchStateInvalid, .internalBatchStateInvalid):
+            return true
+        case let (
+            .transportBatchCountMismatch(leftExpected, leftActual),
+            .transportBatchCountMismatch(rightExpected, rightActual)
+        ):
+            return leftExpected == rightExpected && leftActual == rightActual
         default:
             return false
         }

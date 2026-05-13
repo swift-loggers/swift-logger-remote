@@ -10,7 +10,7 @@ public enum RemoteEngineError: Error, Sendable, Equatable {
     /// ``DurableRemoteQueue/flush()`` failed on the fresh-drain
     /// path. ``RemoteEngine/flush()`` only calls
     /// ``DurableRemoteQueue/flush()`` when there is no
-    /// outstanding batch to replay; on that path it flushes the
+    /// outstanding batch to reuse; on that path it flushes the
     /// queue's writer buffer to disk so the captured prefix
     /// includes every admitted entry. The outstanding-reuse path
     /// skips this step entirely, so this case is only raised
@@ -32,7 +32,7 @@ public enum RemoteEngineError: Error, Sendable, Equatable {
     case drainFailed(DurableRemoteQueueError)
 
     /// Parsing the byte-stable export through
-    /// `BatchEngine.recoverEntries(from:)` failed fail-closed
+    /// `BatchEngine.recoverEntries(from:)` failed closed
     /// before any transport call could be made. The public
     /// ``RemoteEngineParseError`` mirrors the engine-internal
     /// `BatchEngineError` cases one-for-one — including
@@ -48,24 +48,40 @@ public enum RemoteEngineError: Error, Sendable, Equatable {
     /// ``RemoteDeliveryError/invalidBatchState``).
     case batchFailed(RemoteDeliveryError)
 
-    /// The per-entry retry path was interrupted before the entry
-    /// reached a resolved classification. Either the sleep
-    /// injector threw between two retryable attempts or the
-    /// policy delay calculation refused the requested attempt;
-    /// the public ``RemoteEngineRetryError`` taxonomy preserves
-    /// the distinction.
+    /// The batch-round retry path was interrupted before every
+    /// entry in the flush pass reached a resolved classification.
+    /// Either the sleep injector threw between two dispatch
+    /// rounds or the policy delay calculation refused the
+    /// requested attempt; the public ``RemoteEngineRetryError``
+    /// taxonomy preserves the distinction.
     case retryInterrupted(RemoteEngineRetryError)
+
+    /// ``RemoteTransport/sendBatch(_:)`` returned a result array
+    /// whose count does not match the number of items the engine
+    /// handed it. The engine fails closed rather than guessing
+    /// which entries the surplus or missing results refer to;
+    /// the queue still holds the outstanding-batch boundary and
+    /// the export artifact stays on disk so the next
+    /// ``RemoteEngine/flush()`` can reuse the retained export
+    /// artifact through the outstanding-reuse path once the
+    /// adapter is fixed.
+    /// `expected` is the input item count the engine handed
+    /// to ``RemoteTransport/sendBatch(_:)``; `actual` is the
+    /// returned result count.
+    case transportBatchInvalid(expected: Int, actual: Int)
 
     /// Releasing the queue's outstanding-batch boundary by
     /// calling ``DurableRemoteQueue/acknowledge()`` failed.
     /// Reported by the engine for both the empty-drain release
     /// path (no delivered queue payload bytes existed) and the
     /// non-empty acknowledgement path (every entry was resolved
-    /// and the engine acknowledged the boundary). On any
+    /// and the engine acknowledged a fully-resolved non-empty
+    /// flush pass). On any
     /// failure of this case the queue still holds the
     /// outstanding boundary and the export artifact stays on
-    /// disk so the next ``RemoteEngine/flush()`` can replay
-    /// through the outstanding-reuse path.
+    /// disk so the next ``RemoteEngine/flush()`` can reuse the
+    /// retained export artifact through the outstanding-reuse
+    /// path.
     case acknowledgementFailed(DurableRemoteQueueError)
 
     /// Removing the engine-owned export artifact from
@@ -125,7 +141,8 @@ public struct RemoteEngineExportCleanupContext: Sendable, Equatable {
         case emptyRelease
 
         /// Cleanup of the non-empty export artifact after the
-        /// engine acknowledged the drained batch. The queue's
+        /// engine acknowledged a fully-resolved non-empty flush
+        /// pass. The queue's
         /// destructive removal already ran, so the retained
         /// artifact is a duplicate copy of bytes the persistence
         /// layer has already dropped — not a retry source: the
@@ -191,7 +208,10 @@ public enum RemoteEngineParseError: Error, Sendable, Equatable {
 
     /// The envelope parsed but its `contentType` did not match
     /// the queue-owned envelope content type; a foreign envelope
-    /// (one the queue did not produce) is refused fail-closed.
+    /// (one the queue did not produce for the queue-owned
+    /// envelope `contentType`) is refused fail-closed at this
+    /// validation stage, before the queue record's
+    /// `formatVersion` field is decoded.
     case envelopeContentTypeMismatch(expected: String, found: String)
 
     /// The envelope's `payload` was present but its base64 text
@@ -214,25 +234,28 @@ public enum RemoteEngineParseError: Error, Sendable, Equatable {
     case recordFormatVersionUnsupported(found: UInt64, supported: UInt8)
 }
 
-/// Public retry-failure surface for ``RemoteEngineError/retryInterrupted(_:)``.
+/// Public retry-failure surface for
+/// ``RemoteEngineError/retryInterrupted(_:)``.
 ///
-/// Splits the two engine-internal causes the per-entry retry loop
-/// can surface so callers can branch on the layer that interrupted
-/// the retry budget.
+/// Splits the two engine-internal causes the batch-round retry
+/// dispatcher can surface so callers can branch on the layer that
+/// interrupted the retry budget.
 public enum RemoteEngineRetryError: Error, Sendable, Equatable {
     /// The retry-delay calculation refused the requested attempt
-    /// count. The carried ``RemoteDeliveryError`` is the
-    /// policy-space diagnostic; ``RemoteRetryPolicy/make(maxAttempts:backoff:)``
-    /// already enforces that the default calculator accepts every
-    /// attempt the engine passes, so this case names an
-    /// engine-side / seam-injected invariant violation rather than
-    /// a caller-actionable failure.
+    /// count between two batch dispatch rounds. The carried
+    /// ``RemoteDeliveryError`` is the policy-space diagnostic;
+    /// ``RemoteRetryPolicy/make(maxAttempts:backoff:)`` already
+    /// enforces that the default calculator accepts every attempt
+    /// the engine passes, so this case names an engine-side /
+    /// seam-injected invariant violation rather than a
+    /// caller-actionable failure.
     case invalidRetryDelay(RemoteDeliveryError)
 
-    /// The sleep injector threw between two retryable attempts
+    /// The sleep injector threw between two batch dispatch rounds
     /// (e.g. cooperative task cancellation propagated from
     /// Swift concurrency sleep primitives). The underlying error
     /// is intentionally dropped at this layer; the engine treats
-    /// every sleep-injector failure as equivalent.
+    /// every sleep-injector failure as equivalent for retry-loop
+    /// lifecycle purposes.
     case sleepInterrupted
 }
