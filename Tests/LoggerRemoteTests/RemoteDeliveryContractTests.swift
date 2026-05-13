@@ -1,3 +1,5 @@
+// swiftlint:disable file_length - Contract value-type catalog covers every locked public type (LGR-1 through LGR-7 plus the new PR 5/N public engine surface) in a single file so the public-API compile-shape proofs stay adjacent; splitting them would scatter the lock catalog without reducing maintenance burden.
+
 import Foundation
 import Testing
 
@@ -10,34 +12,264 @@ struct RemoteDeliveryContractTests {}
 // MARK: - Sendable conformance
 
 extension RemoteDeliveryContractTests {
+    // swiftlint:disable function_body_length
+    // Reason: Single compile-shape Sendable proof covers every locked public value type (LGR-1…LGR-7) including the PR 5/N public engine surface; splitting into per-type tests would scatter the lock catalog without adding coverage.
     @Test(
         "Contract value types are Sendable",
-        .tags(.lgr1, .lgr2, .lgr3, .lgr4, .lgr5, .lgr7)
+        .tags(.lgr1, .lgr2, .lgr3, .lgr4, .lgr5, .lgr6, .lgr7)
     )
-    func contractValueTypesAreSendable() {
+    func contractValueTypesAreSendable() throws {
         let entry: any Sendable = RemoteDeliveryEntry(
             identifier: 1, payload: Data([0x01])
         )
         let result: any Sendable = RemoteDeliveryResult.success
-        let retry: any Sendable = try? RemoteRetryPolicy.make(
+        let retry: any Sendable = try RemoteRetryPolicy.make(
             maxAttempts: 1, backoff: .constant(seconds: 1)
         )
-        let batch: any Sendable = try? RemoteBatchPolicy.make(
+        let batch: any Sendable = try RemoteBatchPolicy.make(
             maxEntryCount: 1, maxByteCount: 1
         )
         let response: any Sendable = RemoteTransportResponse(
             responseBytes: Data()
         )
         let error: any Sendable = RemoteDeliveryError.batchEmpty
+        let summary: any Sendable = RemoteFlushSummary(
+            attemptedBatches: 0,
+            attemptedEntries: 0,
+            succeededEntries: 0,
+            terminalEntries: 0,
+            retryableEntries: 0,
+            acknowledgement: .emptyReleased
+        )
+        let acknowledgement: any Sendable = RemoteFlushAcknowledgement
+            .removedDeliveredBytes
+        let engineError: any Sendable = RemoteEngineError
+            .retryInterrupted(.sleepInterrupted)
+        let parseError: any Sendable = RemoteEngineParseError
+            .recordPayloadMalformed
+        let retryError: any Sendable = RemoteEngineRetryError
+            .sleepInterrupted
+        let cleanupContext: any Sendable = RemoteEngineExportCleanupContext(
+            exportURL: URL(fileURLWithPath: "/dev/null"),
+            phase: .acknowledgedNonEmpty,
+            errorDomain: "test",
+            errorCode: 0
+        )
+        let cleanupPhase: any Sendable =
+            RemoteEngineExportCleanupContext.Phase.acknowledgedNonEmpty
         // Reaching this assertion proves each type satisfies the
         // existential `Sendable` requirement at compile time.
         #expect(entry is RemoteDeliveryEntry)
         #expect(result is RemoteDeliveryResult)
-        #expect(retry is RemoteRetryPolicy?)
-        #expect(batch is RemoteBatchPolicy?)
+        #expect(retry is RemoteRetryPolicy)
+        #expect(batch is RemoteBatchPolicy)
         #expect(response is RemoteTransportResponse)
         #expect(error is RemoteDeliveryError)
+        #expect(summary is RemoteFlushSummary)
+        #expect(acknowledgement is RemoteFlushAcknowledgement)
+        #expect(engineError is RemoteEngineError)
+        #expect(parseError is RemoteEngineParseError)
+        #expect(retryError is RemoteEngineRetryError)
+        #expect(cleanupContext is RemoteEngineExportCleanupContext)
+        #expect(cleanupPhase is RemoteEngineExportCleanupContext.Phase)
     }
+
+    // swiftlint:enable function_body_length
+}
+
+// MARK: - Public engine surface Equatable shape
+
+extension RemoteDeliveryContractTests {
+    // swiftlint:disable function_body_length
+    // Reason: One per-type compile-shape Equatable proof for every
+    // new public engine surface (`RemoteFlushSummary`,
+    // `RemoteEngineError`, `RemoteEngineParseError`,
+    // `RemoteEngineRetryError`) belongs in a single test because
+    // the cases interlock — splitting would scatter the
+    // associated-value mirroring proofs across multiple tests
+    // without adding coverage.
+
+    @Test(
+        "Public engine surface types are Equatable across resolved + failure outcomes",
+        .tags(.lgr6, .lgr7)
+    )
+    func engineSurfaceTypesAreEquatable() {
+        // RemoteFlushSummary: identical fields compare equal,
+        // single-field mutation compares unequal.
+        let leftSummary = RemoteFlushSummary(
+            attemptedBatches: 1,
+            attemptedEntries: 2,
+            succeededEntries: 1,
+            terminalEntries: 1,
+            retryableEntries: 0,
+            acknowledgement: .removedDeliveredBytes
+        )
+        let rightSummary = RemoteFlushSummary(
+            attemptedBatches: 1,
+            attemptedEntries: 2,
+            succeededEntries: 1,
+            terminalEntries: 1,
+            retryableEntries: 0,
+            acknowledgement: .removedDeliveredBytes
+        )
+        #expect(leftSummary == rightSummary)
+        let mutatedSummary = RemoteFlushSummary(
+            attemptedBatches: 1,
+            attemptedEntries: 2,
+            succeededEntries: 1,
+            terminalEntries: 1,
+            retryableEntries: 0,
+            acknowledgement: .notAcknowledged
+        )
+        #expect(leftSummary != mutatedSummary)
+
+        // RemoteFlushAcknowledgement: all three lifecycle cases
+        // are distinct.
+        #expect(
+            RemoteFlushAcknowledgement.emptyReleased
+                != RemoteFlushAcknowledgement.removedDeliveredBytes
+        )
+        #expect(
+            RemoteFlushAcknowledgement.removedDeliveredBytes
+                != RemoteFlushAcknowledgement.notAcknowledged
+        )
+
+        // RemoteEngineError: every case is distinct; associated
+        // values participate in equality.
+        #expect(
+            RemoteEngineError.flushFailed(.batchAlreadyOutstanding)
+                == RemoteEngineError.flushFailed(.batchAlreadyOutstanding)
+        )
+        #expect(
+            RemoteEngineError.flushFailed(.batchAlreadyOutstanding)
+                != RemoteEngineError.drainFailed(.batchAlreadyOutstanding)
+        )
+        #expect(
+            RemoteEngineError.parseFailed(.recordPayloadMalformed)
+                != RemoteEngineError.parseFailed(.recordPayloadBase64Invalid)
+        )
+        #expect(
+            RemoteEngineError.retryInterrupted(.sleepInterrupted)
+                != RemoteEngineError.retryInterrupted(
+                    .invalidRetryDelay(.invalidRetryPolicy)
+                )
+        )
+        #expect(
+            RemoteEngineError.acknowledgementFailed(.batchAlreadyOutstanding)
+                == RemoteEngineError.acknowledgementFailed(.batchAlreadyOutstanding)
+        )
+
+        // RemoteEngineParseError: associated-value mirroring
+        // preserves expected/actual / expected/found / found/supported.
+        #expect(
+            RemoteEngineParseError.exportByteCountMismatch(expected: 1, actual: 2)
+                != RemoteEngineParseError.exportByteCountMismatch(expected: 1, actual: 3)
+        )
+        #expect(
+            RemoteEngineParseError.envelopeContentTypeMismatch(
+                expected: "application/x-test", found: "application/x-other"
+            )
+                != RemoteEngineParseError.envelopeContentTypeMismatch(
+                    expected: "application/x-test", found: "application/x-different"
+                )
+        )
+        #expect(
+            RemoteEngineParseError.recordFormatVersionUnsupported(found: 999, supported: 1)
+                != RemoteEngineParseError.recordFormatVersionUnsupported(found: 2, supported: 1)
+        )
+
+        // RemoteEngineRetryError: two distinct cases compare
+        // unequal; the `invalidRetryDelay` associated value
+        // participates in equality.
+        #expect(
+            RemoteEngineRetryError.sleepInterrupted
+                != RemoteEngineRetryError.invalidRetryDelay(.invalidRetryPolicy)
+        )
+        #expect(
+            RemoteEngineRetryError.invalidRetryDelay(.invalidRetryPolicy)
+                != RemoteEngineRetryError.invalidRetryDelay(.invalidBatchPolicy)
+        )
+
+        // RemoteEngineExportCleanupContext: every stored field
+        // participates in equality so the diagnostic context
+        // round-trips across error boundaries verbatim.
+        let leftContext = RemoteEngineExportCleanupContext(
+            exportURL: URL(fileURLWithPath: "/tmp/a.ndjson"),
+            phase: .acknowledgedNonEmpty,
+            errorDomain: "NSCocoaErrorDomain",
+            errorCode: 4
+        )
+        let sameContext = RemoteEngineExportCleanupContext(
+            exportURL: URL(fileURLWithPath: "/tmp/a.ndjson"),
+            phase: .acknowledgedNonEmpty,
+            errorDomain: "NSCocoaErrorDomain",
+            errorCode: 4
+        )
+        #expect(leftContext == sameContext)
+        #expect(
+            leftContext
+                != RemoteEngineExportCleanupContext(
+                    exportURL: URL(fileURLWithPath: "/tmp/b.ndjson"),
+                    phase: .acknowledgedNonEmpty,
+                    errorDomain: "NSCocoaErrorDomain",
+                    errorCode: 4
+                )
+        )
+        // `phase` participates in context equality: a context
+        // identical to `leftContext` except for the cleanup phase
+        // must compare unequal so the diagnostic case
+        // round-trips the lifecycle phase, not just the URL +
+        // domain + code triple.
+        let phaseDifferentContext = RemoteEngineExportCleanupContext(
+            exportURL: URL(fileURLWithPath: "/tmp/a.ndjson"),
+            phase: .emptyRelease,
+            errorDomain: "NSCocoaErrorDomain",
+            errorCode: 4
+        )
+        #expect(leftContext != phaseDifferentContext)
+        // `errorDomain` participates in context equality: a
+        // context identical to `leftContext` except for the
+        // bridged `NSError.domain` must compare unequal so the
+        // diagnostic preserves the failure namespace.
+        let domainDifferentContext = RemoteEngineExportCleanupContext(
+            exportURL: URL(fileURLWithPath: "/tmp/a.ndjson"),
+            phase: .acknowledgedNonEmpty,
+            errorDomain: "NSPOSIXErrorDomain",
+            errorCode: 4
+        )
+        #expect(leftContext != domainDifferentContext)
+        // `errorCode` participates in context equality: a context
+        // identical to `leftContext` except for the bridged
+        // `NSError.code` must compare unequal so the diagnostic
+        // preserves the failure code verbatim.
+        let codeDifferentContext = RemoteEngineExportCleanupContext(
+            exportURL: URL(fileURLWithPath: "/tmp/a.ndjson"),
+            phase: .acknowledgedNonEmpty,
+            errorDomain: "NSCocoaErrorDomain",
+            errorCode: 5
+        )
+        #expect(leftContext != codeDifferentContext)
+        #expect(
+            RemoteEngineExportCleanupContext.Phase.emptyRelease
+                != RemoteEngineExportCleanupContext.Phase.acknowledgedNonEmpty
+        )
+        // Cleanup-failure case round-trips through `RemoteEngineError`
+        // equality with the inner context value participating.
+        #expect(
+            RemoteEngineError.exportCleanupFailed(leftContext)
+                == RemoteEngineError.exportCleanupFailed(sameContext)
+        )
+        #expect(
+            RemoteEngineError.exportCleanupFailed(leftContext)
+                != RemoteEngineError.exportCleanupFailed(phaseDifferentContext)
+        )
+        #expect(
+            RemoteEngineError.exportCleanupFailed(leftContext)
+                != RemoteEngineError.acknowledgementFailed(.batchAlreadyOutstanding)
+        )
+    }
+
+    // swiftlint:enable function_body_length
 }
 
 // MARK: - RemoteRetryPolicy validation
@@ -487,16 +719,5 @@ extension RemoteDeliveryContractTests {
         #expect(response.responseBytes == bytes)
         #expect(response.responseMetadata == ["vendor-code": "ok"])
         #expect(defaultMetadata.responseMetadata.isEmpty)
-    }
-}
-
-// MARK: - RemoteEngine placeholder
-
-extension RemoteDeliveryContractTests {
-    @Test("`RemoteEngine` placeholder is constructible with no public dispatch surface")
-    func remoteEnginePlaceholderConstructs() async {
-        let engine = RemoteEngine()
-        // Current scope intentionally exposes no dispatch API.
-        _ = engine
     }
 }

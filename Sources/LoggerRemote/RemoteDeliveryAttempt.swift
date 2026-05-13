@@ -6,10 +6,11 @@
 /// that were actually consumed (1-indexed, never above
 /// ``RemoteRetryPolicy/maxAttempts``).
 ///
-/// The type is engine-internal: PR 4/N exposes no public delivery
-/// surface beyond the existing contract value types, so attempts
-/// flow only through internal machinery and the test target via
-/// `@testable import`.
+/// The type is engine-internal: `LoggerRemote` exposes no public
+/// per-entry attempt surface (the public ``RemoteFlushSummary``
+/// returned by ``RemoteEngine/flush()`` only carries per-class
+/// counts), so attempts flow only through internal machinery and
+/// the test target via `@testable import`.
 internal struct RemoteDeliveryAttempt: Sendable, Equatable {
     /// The entry the engine attempted to deliver.
     let entry: RemoteDeliveryEntry

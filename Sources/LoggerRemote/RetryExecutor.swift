@@ -1,7 +1,7 @@
 /// Engine-internal per-entry retry executor.
 ///
-/// ``deliver(entry:transport:policy:classifier:sleep:delayCalculator:)``
-/// drives one ``RemoteDeliveryEntry`` through ``RemoteRetryPolicy``
+/// ``deliver(entry:transport:policy:sleep:delayCalculator:)`` drives
+/// one ``RemoteDeliveryEntry`` through ``RemoteRetryPolicy``
 /// semantics:
 ///
 /// - Each attempt invokes ``RemoteTransport/send(payloadBytes:payloadMetadata:)``
@@ -11,11 +11,11 @@
 ///   ``BatchEngine/makeBatches(from:policy:)`` are the iteration unit
 ///   the higher-level ``ExecutionLoop`` walks, not a wire-request
 ///   atomic unit.
-/// - The injected `classifier` maps the transport result (either a
-///   ``RemoteTransportResponse`` or a thrown error) into a
-///   ``RemoteDeliveryResult``. Classification is sink-owned and the
-///   engine never inspects HTTP status, vendor body codes, or
-///   transport error types.
+/// - ``RemoteTransport/classify(_:)`` maps the per-attempt result
+///   (either a ``RemoteTransportResponse`` or a thrown error) into a
+///   ``RemoteDeliveryResult``. Classification is sink-owned
+///   (LGR-7 / LGR-9) and the engine never inspects HTTP status,
+///   vendor body codes, or transport error types.
 /// - `.success` and `.terminal` outcomes stop attempts immediately;
 ///   only `.retryable` consumes additional budget.
 /// - Backoff between two retryable attempts is computed by the
@@ -26,7 +26,7 @@
 ///   retryable attempts; the final attempt is followed by an
 ///   immediate return rather than a no-op sleep.
 /// - A delay-calculation failure surfaces as
-///   ``ExecutionLoopError/invalidRetryDelay(_:)`` carrying the
+///   ``BatchDeliveryError/invalidRetryDelay(_:)`` carrying the
 ///   underlying ``RemoteDeliveryError``. The
 ///   ``RemoteRetryPolicy/make(maxAttempts:backoff:)`` factory
 ///   already enforces that the default
@@ -35,13 +35,14 @@
 ///   engine-side / seam-injected invariant marker — not a
 ///   `sleepInterrupted` collapse.
 /// - A `sleep` failure between two retryable attempts surfaces as
-///   ``ExecutionLoopError/sleepInterrupted``, distinct from a
+///   ``BatchDeliveryError/sleepInterrupted``, distinct from a
 ///   delay-calculation failure.
 ///
 /// The executor never invokes ``DurableRemoteQueue/acknowledge()``
-/// and performs no destructive removal; the
-/// acknowledgement-to-removal lifecycle closure is the PR 5/N
-/// concern.
+/// and performs no destructive removal of delivered queue payload
+/// bytes; the acknowledgement-to-removal lifecycle closure for
+/// non-empty flush passes is driven by ``RemoteEngine/flush()``
+/// above this layer.
 internal enum RetryExecutor {
     /// Drives one entry through the retry loop.
     ///
@@ -49,14 +50,12 @@ internal enum RetryExecutor {
     ///   - entry: Durable delivery entry to attempt.
     ///   - transport: Sink-neutral transport conformer; the executor
     ///     calls ``RemoteTransport/send(payloadBytes:payloadMetadata:)``
-    ///     once per attempt with `entry.payload` and `entry.metadata`.
+    ///     once per attempt with `entry.payload` and `entry.metadata`
+    ///     and then ``RemoteTransport/classify(_:)`` to map the
+    ///     result into ``RemoteDeliveryResult``.
     ///   - policy: Retry budget + backoff schedule. The executor
     ///     stops at `policy.maxAttempts` regardless of whether the
     ///     last attempt was retryable.
-    ///   - classifier: Sink-owned mapping from transport result into
-    ///     ``RemoteDeliveryResult``. Invoked once per attempt with
-    ///     `.success(response)` for a returned response or
-    ///     `.failure(error)` for a thrown transport error.
     ///   - sleep: Sleep injector applied between two retryable
     ///     attempts. The engine never sleeps after the final attempt.
     ///   - delayCalculator: Engine-internal seam returning the
@@ -64,7 +63,7 @@ internal enum RetryExecutor {
     ///     Defaults to
     ///     ``RemoteRetryPolicy/delayBeforeRetry(attempt:)``; the
     ///     parameter exists so the test target can drive the
-    ///     ``ExecutionLoopError/invalidRetryDelay(_:)`` branch that
+    ///     ``BatchDeliveryError/invalidRetryDelay(_:)`` branch that
     ///     ``RemoteRetryPolicy/make(maxAttempts:backoff:)`` makes
     ///     unreachable from the public API. Production callers
     ///     leave the default.
@@ -72,22 +71,21 @@ internal enum RetryExecutor {
     ///   final outcome and the number of attempts actually consumed
     ///   (1-indexed, never above `policy.maxAttempts`).
     /// - Throws:
-    ///   - ``ExecutionLoopError/invalidRetryDelay(_:)`` when the
+    ///   - ``BatchDeliveryError/invalidRetryDelay(_:)`` when the
     ///     delay calculator refuses the requested attempt count.
-    ///   - ``ExecutionLoopError/sleepInterrupted`` when the
+    ///   - ``BatchDeliveryError/sleepInterrupted`` when the
     ///     `sleep` closure throws between two retryable attempts
     ///     (e.g. cooperative task cancellation propagated from
-    ///     `Task.sleep(for:)`).
+    ///     Swift concurrency sleep primitives).
     static func deliver(
         entry: RemoteDeliveryEntry,
         transport: any RemoteTransport,
         policy: RemoteRetryPolicy,
-        classifier: @Sendable (Result<RemoteTransportResponse, any Error>) async -> RemoteDeliveryResult,
         sleep: @Sendable (Double) async throws -> Void,
         delayCalculator: @Sendable (RemoteRetryPolicy, Int) throws(RemoteDeliveryError) -> Double = { policy, attempt in
             try policy.delayBeforeRetry(attempt: attempt)
         }
-    ) async throws(ExecutionLoopError) -> RemoteDeliveryAttempt {
+    ) async throws(BatchDeliveryError) -> RemoteDeliveryAttempt {
         var attempt = 1
         while true {
             let result: Result<RemoteTransportResponse, any Error>
@@ -100,7 +98,7 @@ internal enum RetryExecutor {
             } catch {
                 result = .failure(error)
             }
-            let outcome = await classifier(result)
+            let outcome = await transport.classify(result)
             switch outcome {
             case .success, .terminal:
                 return RemoteDeliveryAttempt(

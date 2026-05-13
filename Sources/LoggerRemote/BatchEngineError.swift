@@ -3,9 +3,12 @@
 /// queue export.
 ///
 /// The error is intentionally not part of the public engine
-/// surface; the batching engine is internal machinery in this
-/// milestone and surfaces failures back to the delivery loop that
-/// a future PR ships.
+/// surface; the batching engine is internal machinery and
+/// surfaces failures back to the engine-internal
+/// ``ExecutionLoop`` / ``RemoteEngine`` lifecycle. The public
+/// translation lives on ``RemoteEngineParseError``, which mirrors
+/// these cases one-for-one when surfaced through
+/// ``RemoteEngine/flush()``.
 internal enum BatchEngineError: Error, Sendable, Equatable {
     /// Reading the byte-stable export file produced by
     /// ``DurableRemoteQueue/drain(to:)`` failed.
@@ -58,11 +61,11 @@ internal enum BatchEngineError: Error, Sendable, Equatable {
     case recordFormatVersionMissing
 
     /// The queue record carried a `formatVersion` the engine does
-    /// not recognize. The future delivery loop's parser refuses to
-    /// interpret unknown versions rather than silently treating
-    /// new fields as missing. `found` is widened to `UInt64` so an
-    /// integer outside the current `UInt8` schema-version space
-    /// (e.g. `999`) routes to this diagnostic instead of being
-    /// classified as a generic malformed record.
+    /// not recognize. The engine-internal ``BatchEngine`` parser
+    /// refuses to interpret unknown versions rather than silently
+    /// treating new fields as missing. `found` is widened to
+    /// `UInt64` so an integer outside the current `UInt8`
+    /// schema-version space (e.g. `999`) routes to this diagnostic
+    /// instead of being classified as a generic malformed record.
     case recordFormatVersionUnsupported(found: UInt64, supported: UInt8)
 }

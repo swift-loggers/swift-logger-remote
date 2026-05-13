@@ -23,7 +23,9 @@ extension Tag {
     /// Transport surface is sink-neutral and does not impose HTTP semantics.
     @Tag public static var lgr5: Self
 
-    /// Flush lifecycle vocabulary and observer surface are deferred.
+    /// Flush is caller-driven through `RemoteEngine.flush()`; the
+    /// engine owns no timer or platform lifecycle observer and
+    /// serializes concurrent calls via actor isolation.
     @Tag public static var lgr6: Self
 
     /// Delivery error surface is typed and sink-neutral.

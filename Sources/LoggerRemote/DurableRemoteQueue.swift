@@ -5,15 +5,24 @@ import LoggerPersistence
 /// Durable persistence-backed accept / drain / acknowledge surface
 /// for the remote-delivery engine.
 ///
-/// `DurableRemoteQueue` is the only piece of `swift-logger-remote`
-/// that touches `swift-logger-persistence`. The engine's delivery
-/// loop, retry scheduler, and transport implementations consume the
-/// queue's drained batches; they never call the persistence package
-/// directly. Removal of accepted bytes happens exclusively through
-/// ``acknowledge()`` after the transport classifies a drained batch
-/// as successfully delivered (LGR-10, LGR-11).
+/// `DurableRemoteQueue` is the persistence boundary of
+/// `swift-logger-remote`: the only piece of the package that
+/// touches `swift-logger-persistence`. Flush trigger semantics and
+/// the acknowledgement-to-removal lifecycle are owned by
+/// ``RemoteEngine/flush()``; entry recovery and batch construction
+/// are owned by the engine-internal `BatchEngine`; per-entry retry
+/// execution is owned by the engine-internal `RetryExecutor`;
+/// transport implementations live in adapter packages outside the
+/// queue. The queue itself just admits, drains, and acknowledges.
 ///
-/// Current scope is minimal:
+/// Destructive removal of accepted bytes happens exclusively
+/// through ``acknowledge()`` and is driven only by
+/// ``RemoteEngine/flush()`` when every recovered entry in a
+/// non-empty flush pass reaches ``RemoteDeliveryResult/success``
+/// or ``RemoteDeliveryResult/terminal(reason:)`` (LGR-10, LGR-11).
+/// The empty-drain path also acknowledges to release the
+/// in-memory outstanding-batch boundary, but removes no delivered
+/// queue payload bytes because none existed.
 ///
 /// - ``enqueue(_:)`` admits one ``RemoteDeliveryEntry`` into the
 ///   persistence layer through a package-owned internal queue
@@ -26,11 +35,6 @@ import LoggerPersistence
 ///   to acknowledge.
 /// - ``acknowledge()`` consumes the in-memory removal boundary
 ///   captured by the most recent successful drain.
-///
-/// Real HTTP transport, retry scheduling, batch-policy slicing,
-/// flush trigger semantics, and lifecycle-observer wiring stay out
-/// of scope for this milestone and ship with the engine delivery
-/// loop.
 public actor DurableRemoteQueue {
     /// Queue-owned constant `contentType` value recorded on every
     /// persisted envelope. Locked as queue-internal so the
@@ -83,7 +87,7 @@ public actor DurableRemoteQueue {
     /// parameter. Persistence retention (`.maxSegments`,
     /// `.maxTotalBytes`, `.maxAge`) could delete bytes that were
     /// never acknowledged by the delivery loop, which would violate
-    /// LGR-11 (acknowledgement is the only trigger for durable
+    /// LGR-11 (acknowledgement is the only trigger for destructive
     /// removal). The queue hardcodes `.unlimited`; a bounded queue
     /// policy is a future contract separate from persistence
     /// retention.
@@ -232,10 +236,10 @@ public actor DurableRemoteQueue {
         // successful `exportLogs(to:)`. From here on a queue-side
         // failure leaves the queue without a queue-held outstanding
         // batch reference: the persistence boundary may still
-        // exist, but the queue neither holds it nor handed it to
-        // the caller. `acknowledge()` must refuse the destructive
-        // remove in that state — see the queue-held-batch guard
-        // in `acknowledge()`.
+        // exist, but the queue neither holds it nor has handed it
+        // to the caller. `acknowledge()` must refuse the
+        // destructive remove in that state — see the
+        // queue-held-batch guard in `acknowledge()`.
         let byteCount: UInt64
         if let override = exportSizeReaderForTesting {
             do {
@@ -296,9 +300,10 @@ public actor DurableRemoteQueue {
     /// and not durable across actor-instance lifetime: deallocating
     /// or rebuilding the actor loses the in-memory batch
     /// reference, and the queue has no replay/query API to
-    /// rebuild it. The future delivery loop consumes this value
-    /// only for in-actor retry against the captured persistence
-    /// boundary.
+    /// rebuild it. ``RemoteEngine/flush()`` consumes this value
+    /// to decide whether to drain a fresh boundary or reuse the
+    /// still-held outstanding batch for in-actor retry against
+    /// the captured persistence boundary.
     internal func currentOutstandingBatch() -> DurableRemoteQueueBatch? {
         outstandingBatch
     }

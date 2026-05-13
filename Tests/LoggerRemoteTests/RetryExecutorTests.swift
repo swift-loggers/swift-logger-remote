@@ -81,6 +81,17 @@ extension RetryExecutorTests {
             )
         )
     }
+
+    /// Builds a `StubRemoteTransport` with the shared
+    /// ``metadataClassifier`` already wired up. Most retry-executor
+    /// tests use this; tests that need a custom classifier (e.g.
+    /// the kind-inspecting one) call
+    /// `StubRemoteTransport.init(outcomes:classifier:)` directly.
+    static func makeStubTransport(
+        outcomes: [StubTransportOutcome]
+    ) -> StubRemoteTransport {
+        StubRemoteTransport(outcomes: outcomes, classifier: metadataClassifier)
+    }
 }
 
 // MARK: - First-attempt success
@@ -96,7 +107,7 @@ extension RetryExecutorTests {
             payload: Data([0x01]),
             metadata: ["route": "primary"]
         )
-        let transport = StubRemoteTransport(
+        let transport = Self.makeStubTransport(
             outcomes: [.response(Self.makeSuccessResponse())]
         )
         let recorder = SleepRecorder()
@@ -107,7 +118,6 @@ extension RetryExecutorTests {
             entry: entry,
             transport: transport,
             policy: policy,
-            classifier: Self.metadataClassifier,
             sleep: sleep
         )
 
@@ -132,7 +142,7 @@ extension RetryExecutorTests {
     )
     func retryableThenSuccess() async throws {
         let entry = Self.makeEntry()
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .response(Self.makeRetryableResponse()),
             .response(Self.makeRetryableResponse()),
             .response(Self.makeSuccessResponse())
@@ -145,7 +155,6 @@ extension RetryExecutorTests {
             entry: entry,
             transport: transport,
             policy: policy,
-            classifier: Self.metadataClassifier,
             sleep: sleep
         )
 
@@ -167,7 +176,7 @@ extension RetryExecutorTests {
     )
     func retryableBudgetExhausted() async throws {
         let entry = Self.makeEntry()
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .response(Self.makeRetryableResponse()),
             .response(Self.makeRetryableResponse()),
             .response(Self.makeRetryableResponse())
@@ -180,7 +189,6 @@ extension RetryExecutorTests {
             entry: entry,
             transport: transport,
             policy: policy,
-            classifier: Self.metadataClassifier,
             sleep: sleep
         )
 
@@ -204,7 +212,7 @@ extension RetryExecutorTests {
     )
     func terminalNoRetry() async throws {
         let entry = Self.makeEntry()
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .response(Self.makeTerminalResponse()),
             // Extra responses present but the engine MUST NOT touch
             // them after a terminal classification on attempt 1.
@@ -218,7 +226,6 @@ extension RetryExecutorTests {
             entry: entry,
             transport: transport,
             policy: policy,
-            classifier: Self.metadataClassifier,
             sleep: sleep
         )
 
@@ -240,7 +247,7 @@ extension RetryExecutorTests {
     )
     func thrownTransportClassifiedRetryable() async throws {
         let entry = Self.makeEntry()
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .failure(StubTransportError(kind: .connectionFailure)),
             .failure(StubTransportError(kind: .connectionFailure)),
             .response(Self.makeSuccessResponse())
@@ -253,7 +260,6 @@ extension RetryExecutorTests {
             entry: entry,
             transport: transport,
             policy: policy,
-            classifier: Self.metadataClassifier,
             sleep: sleep
         )
 
@@ -275,16 +281,11 @@ extension RetryExecutorTests {
     )
     func kindInspectingClassifierMapsPermanentFailureToTerminal() async throws {
         let entry = Self.makeEntry()
-        let transport = StubRemoteTransport(outcomes: [
-            .failure(StubTransportError(kind: .permanentFailure)),
-            // The executor must never reach this slot once the
-            // permanent failure has been classified as terminal.
-            .response(Self.makeSuccessResponse())
-        ])
-        let recorder = SleepRecorder()
-        let sleep = RecordingSleep.make(recorder: recorder)
-        let policy = try Self.makeConstantPolicy(maxAttempts: 4, seconds: 0.05)
-        let classifier:
+        // Custom kind-inspecting classifier baked into the transport
+        // fixture so the executor's `transport.classify(_:)` call
+        // hits this branch instead of the suite-wide
+        // `metadataClassifier`.
+        let kindInspectingClassifier:
             @Sendable (Result<RemoteTransportResponse, any Error>) async -> RemoteDeliveryResult = {
                 switch $0 {
                 case .success:
@@ -301,12 +302,23 @@ extension RetryExecutorTests {
                     }
                 }
             }
+        let transport = StubRemoteTransport(
+            outcomes: [
+                .failure(StubTransportError(kind: .permanentFailure)),
+                // The executor must never reach this slot once the
+                // permanent failure has been classified as terminal.
+                .response(Self.makeSuccessResponse())
+            ],
+            classifier: kindInspectingClassifier
+        )
+        let recorder = SleepRecorder()
+        let sleep = RecordingSleep.make(recorder: recorder)
+        let policy = try Self.makeConstantPolicy(maxAttempts: 4, seconds: 0.05)
 
         let attempt = try await RetryExecutor.deliver(
             entry: entry,
             transport: transport,
             policy: policy,
-            classifier: classifier,
             sleep: sleep
         )
 
@@ -328,7 +340,7 @@ extension RetryExecutorTests {
     )
     func constantBackoffSequence() async throws {
         let entry = Self.makeEntry()
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .response(Self.makeRetryableResponse()),
             .response(Self.makeRetryableResponse()),
             .response(Self.makeRetryableResponse()),
@@ -342,7 +354,6 @@ extension RetryExecutorTests {
             entry: entry,
             transport: transport,
             policy: policy,
-            classifier: Self.metadataClassifier,
             sleep: sleep
         )
 
@@ -356,7 +367,7 @@ extension RetryExecutorTests {
     )
     func exponentialBackoffSequence() async throws {
         let entry = Self.makeEntry()
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .response(Self.makeRetryableResponse()),
             .response(Self.makeRetryableResponse()),
             .response(Self.makeRetryableResponse()),
@@ -376,7 +387,6 @@ extension RetryExecutorTests {
             entry: entry,
             transport: transport,
             policy: policy,
-            classifier: Self.metadataClassifier,
             sleep: sleep
         )
 
@@ -396,7 +406,7 @@ extension RetryExecutorTests {
     )
     func delayCalculatorFailureSurfacesInvalidRetryDelay() async throws {
         let entry = Self.makeEntry()
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .response(Self.makeRetryableResponse()),
             // Extra slot present but unreachable: the delay
             // calculator throws between attempts 1 and 2 so the
@@ -407,7 +417,7 @@ extension RetryExecutorTests {
         let sleep = RecordingSleep.make(recorder: recorder)
         let policy = try Self.makeConstantPolicy(maxAttempts: 4, seconds: 0.05)
 
-        var caught: ExecutionLoopError?
+        var caught: BatchDeliveryError?
         do {
             // Test-only delay calculator seam: refuses every
             // attempt count so we drive the `.invalidRetryDelay`
@@ -417,7 +427,6 @@ extension RetryExecutorTests {
                 entry: entry,
                 transport: transport,
                 policy: policy,
-                classifier: Self.metadataClassifier,
                 sleep: sleep,
                 delayCalculator: { (_: RemoteRetryPolicy, _: Int) throws(RemoteDeliveryError) -> Double in
                     throw .invalidRetryPolicy
@@ -448,7 +457,7 @@ extension RetryExecutorTests {
     )
     func sleepInjectorFailureSurfaces() async throws {
         let entry = Self.makeEntry()
-        let transport = StubRemoteTransport(outcomes: [
+        let transport = Self.makeStubTransport(outcomes: [
             .response(Self.makeRetryableResponse()),
             .response(Self.makeRetryableResponse()),
             .response(Self.makeSuccessResponse())
@@ -461,13 +470,12 @@ extension RetryExecutorTests {
         )
         let policy = try Self.makeConstantPolicy(maxAttempts: 4, seconds: 0.05)
 
-        var caught: ExecutionLoopError?
+        var caught: BatchDeliveryError?
         do {
             _ = try await RetryExecutor.deliver(
                 entry: entry,
                 transport: transport,
                 policy: policy,
-                classifier: Self.metadataClassifier,
                 sleep: sleep
             )
             Issue.record("expected .sleepInterrupted")

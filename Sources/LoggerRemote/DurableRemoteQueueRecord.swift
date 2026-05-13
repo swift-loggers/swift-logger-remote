@@ -9,16 +9,16 @@ import Foundation
 /// entry into this record and uses the encoded bytes as the
 /// persistence `payload`. The record is intentionally internal so
 /// the public engine surface stays free of a queue-specific
-/// container type; the future delivery loop's parser reads the
-/// same record back through the same encoder.
+/// container type; the engine-internal ``BatchEngine`` parser
+/// reads the same record back through the same encoder.
 ///
-/// The record is a durable on-disk schema: bytes a writer of one
-/// queue version persists must be parseable by a reader of any
-/// later compatible queue version. ``formatVersion`` is the
-/// schema-evolution anchor every record carries; the future
-/// delivery loop's parser MUST inspect it before decoding any
-/// other field and refuse to interpret an unknown version rather
-/// than silently treating new fields as missing.
+/// The record is a persistent on-disk schema: bytes a writer of
+/// one queue version persists must be parseable by a reader of
+/// any later compatible queue version. ``formatVersion`` is the
+/// schema-evolution anchor every record carries; the engine-
+/// internal ``BatchEngine`` parser MUST inspect it before
+/// decoding any other field and refuse to interpret an unknown
+/// version rather than silently treating new fields as missing.
 internal struct DurableRemoteQueueRecord: Codable, Sendable, Equatable {
     /// Current queue-record schema version. Increment when the
     /// on-disk shape changes; readers MUST reject unknown versions

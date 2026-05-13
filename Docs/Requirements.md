@@ -15,7 +15,7 @@ status is tracked by the roadmap and coverage documents.
 | LGR-3 | Retry policy exposes a retry limit and a backoff schedule model; the engine does not own the timer or scheduler. | M3.4 |
 | LGR-4 | Batch policy exposes a max entry count and a max byte count and produces deterministic boundary behavior. | M3.4 |
 | LGR-5 | Transport surface accepts payload bytes plus metadata and returns response bytes plus sink-owned response metadata without imposing HTTP semantics on the core contract; transport is sink-neutral and does not expose HTTP status as a core response field. | M3.4 |
-| LGR-6 | Flush lifecycle vocabulary is deferred until the flush / lifecycle contract ships; the lifecycle-observer surface remains deferred until the same boundary. | Deferred (Future M3.4 milestone) |
+| LGR-6 | Flush is caller-driven through `RemoteEngine.flush()`. The engine owns no timer and no platform lifecycle observer; host applications drive lifecycle integration on their side and invoke `flush()` from the appropriate hook (background notifications, shutdown signals, periodic tasks). Actor isolation serializes concurrent invocations so the engine never runs two passes against the same queue simultaneously. | M3.4 |
 | LGR-7 | Delivery error surface is a typed sink-neutral diagnostic enum suitable for adapter classification; HTTP / vendor body codes stay inside adapter classifiers. | M3.4 |
 
 ## Sink Neutrality
@@ -85,74 +85,145 @@ status is tracked by the roadmap and coverage documents.
 - **Retry / execution loop (PR 4/N).** `RetryExecutor` and
   `ExecutionLoop` add an engine-internal retry / execution pass
   over the existing queue + batching + transport primitives.
-  `RetryExecutor.deliver(entry:transport:policy:classifier:sleep:)`
-  drives one `RemoteDeliveryEntry` through the
-  `RemoteRetryPolicy` budget independently from other entries in
-  the same batch: each attempt dispatches exactly one
-  `RemoteTransport.send(payloadBytes:payloadMetadata:)` call for
-  the delivery entry with the entry's `payload` and `metadata`
+  `RetryExecutor.deliver(entry:transport:policy:sleep:)` uses the
+  transport-owned classifier and drives one `RemoteDeliveryEntry`
+  through the `RemoteRetryPolicy` budget independently from other
+  entries in the same batch: each attempt
+  dispatches exactly one
+  `RemoteTransport.send(payloadBytes:payloadMetadata:)` call for the
+  delivery entry with the entry's `payload` and `metadata`
   (per-entry dispatch, LGR-5 sink-neutrality, without batch-level
-  transport encoding or aggregation), an injected classifier maps
-  each result into `RemoteDeliveryResult`,
-  `.success` / `.terminal` stop attempts immediately, and
-  `.retryable` consumes additional budget until
+  transport encoding or aggregation), and then calls
+  `RemoteTransport.classify(_:)` to map each result into
+  `RemoteDeliveryResult`. `.success` / `.terminal` stop attempts
+  immediately, and `.retryable` consumes additional budget until
   `policy.maxAttempts` (minimum 1, including the first attempt).
-  The classifier runs before any sleep decision; backoff is
+  Classification runs before any sleep decision; backoff is
   scheduled only after a retryable classification for the
-  just-completed attempt, so `.success` and `.terminal` outcomes
-  never schedule backoff. The engine does not own wall-clock timing
-  (LGR-3); retry delay is applied through an injected sleep
-  closure after retryable classifier evaluation for the
-  just-completed attempt. Backoff between two retryable attempts is
-  taken from `RemoteRetryPolicy.delayBeforeRetry(attempt:)` using
-  the just-completed retryable attempt count for the delivery entry.
-  Sleep happens only between retryable attempts; the final attempt
-  is followed by an immediate return from
-  `RetryExecutor.deliver(...)` without additional backoff
-  scheduling.
+  just-completed attempt. The engine does not own wall-clock timing
+  (LGR-3); retry delay comes from
+  `RemoteRetryPolicy.delayBeforeRetry(attempt:)` using the
+  just-completed retryable attempt count, and is applied through an
+  injected sleep closure (backed by Swift concurrency sleep
+  primitives in the public engine). Sleep happens only between
+  retryable attempts.
   `ExecutionLoop.runOnce(...)` composes
   `DurableRemoteQueue.drain(to:)` →
   `BatchEngine.recoverEntries(from:)` →
   `BatchEngine.makeBatches(from:policy:)` → per-entry
-  `RetryExecutor.deliver(...)` sequentially without batch-level
-  transport aggregation or shared retry state and returns a
+  `RetryExecutor.deliver(...)` sequentially and returns a
   deterministically ordered `[RemoteDeliveryAttempt]` matching
-  queue export traversal order for the drained export across batch
-  traversal order and entry traversal order within each batch,
-  without mutating queue acknowledgement state. During PR 4/N, the
-  loop never invokes `acknowledge()` on a non-empty delivered
-  batch, even when every delivery attempt succeeds, and performs no
-  destructive removal of delivered queue payload bytes;
-  the acknowledgement-to-removal lifecycle for non-empty delivered
-  queue payload batches stays a PR 5/N concern (a non-empty
-  drained-but-unacknowledged batch from a preceding `runOnce`
-  surfaces as `.batchAlreadyOutstanding` on the next call). On the
-  empty-drain path the loop short-circuits on the
-  queue's authoritative zero-byte signal
+  queue export traversal order, without mutating queue
+  acknowledgement state for non-empty drained exports. The
+  engine-internal loop never invokes `acknowledge()` for a
+  non-empty drained export — that lifecycle is owned by
+  `RemoteEngine.flush()` above
+  this layer (see PR 5/N). On the empty-drain path the loop
+  short-circuits on the queue's authoritative zero-byte signal
   (`DurableRemoteQueueBatch.byteCount == 0`) **before** invoking
-  `BatchEngine.recoverEntries(from:)` — there is nothing to
-  parse — and releases the held outstanding-batch boundary by
-  calling `acknowledge()` before returning `[]`. Keying the
+  `BatchEngine.recoverEntries(from:)` and releases the held
+  outstanding-batch boundary by calling `acknowledge()`. Keying the
   release off `byteCount == 0` rather than off "the recovered
-  entry stream is empty" means a missing or unreadable
-  export artifact after the queue's authoritative zero-byte drain
-  signal cannot block this path. The empty drain export carries no
-  delivered queue payload bytes in the drained export file and
-  therefore no destructive-removal candidate bytes, so this is not
-  a destructive-removal step; the in-memory boundary must still
-  clear so a polling caller is not blocked by
-  `.batchAlreadyOutstanding` on the next empty pass. A failure
-  of that empty release surfaces as
+  entry stream is empty" means a missing or unreadable export
+  artifact after the queue's authoritative zero-byte drain signal
+  cannot block this path. For the empty export, the empty drain
+  release carries no delivered queue payload bytes in the drained
+  export file and is not a destructive-removal step. A failure of
+  that empty release surfaces as
   `ExecutionLoopError.emptyBatchReleaseFailed(_:)` rather than
   being masked as `drainFailed`. The PR carries a test-only
   `StubRemoteTransport` fixture explicitly marked as such, not
   public API.
-- **Deferred — flush / lifecycle / transport integration (PR 5/N).**
-  Flush trigger semantics, lifecycle hook surface, production
-  `RemoteTransport` adapter integration on top of the
-  engine-internal `ExecutionLoop`, and the
-  acknowledgement-to-removal lifecycle close M3.4 along with final
-  docs / coverage / CI readiness.
+- **Public delivery engine (PR 5/N).** `RemoteEngine` is the
+  public delivery surface: an actor whose `flush()` method runs
+  one caller-driven delivery pass over an `exportDirectory` it
+  manages exclusively. The caller owns the directory's lifecycle:
+  it MUST already exist, MUST be writable by the engine's process,
+  and SHOULD be a caller-controlled private location not shared
+  with other code paths. The engine creates only unique scratch
+  export files inside the directory; it does not create the parent
+  directory, set or audit access-control policy, or sweep
+  pre-existing files. Each `flush()` first consults
+  `DurableRemoteQueue.currentOutstandingBatch()` before allocating a
+  fresh scratch export: when the queue is still holding a drained
+  batch, the engine reuses that batch (and its already-written export
+  file) without flushing or draining new bytes;
+  only when no outstanding batch exists does the engine enter the
+  fresh path. First, it calls `DurableRemoteQueue.flush()` against
+  the queue. Then it drains into a fresh unique scratch file inside
+  the export directory owned exclusively by the engine actor for that
+  flush pass. The engine then orchestrates
+  `BatchEngine.recoverEntries(from:)`,
+  `BatchEngine.makeBatches(from:policy:)`, and per-entry
+  `RetryExecutor.deliver(...)` sequentially. After all delivery attempts
+  complete, it decides acknowledgement for the drained export file based
+  on the per-classification tally across the entire flush pass, without
+  batch-level acknowledgement decisions. The engine calls
+  `DurableRemoteQueue.acknowledge()` only when each recovered entry for
+  that drained export
+  reaches a fully-resolved classification outcome:
+  `RemoteDeliveryResult.success` or
+  `RemoteDeliveryResult.terminal(reason:)`. A single
+  `RemoteDeliveryResult.retryable(reason:)` outcome (per-entry
+  budget exhausted without resolution) across the entire flush pass
+  keeps the boundary held for the next flush so the same drained
+  export bytes are retried through the outstanding-reuse path.
+  Export-file cleanup for the drained export artifact is keyed off the
+  acknowledgement decision: drain failure before
+  the engine owns a reusable drained batch reference for the current
+  flush pass runs best-effort cleanup of the just-allocated scratch
+  URL (the drain error is the primary diagnostic, so cleanup failure
+  is suppressed on this path);
+  empty release and
+  non-empty fully-resolved + acknowledged delivery passes remove
+  the export file, and
+  any cleanup failure surfaces as
+  `RemoteEngineError.exportCleanupFailed(RemoteEngineExportCleanupContext)`
+  after acknowledgement state is already final for that phase, with
+  the export URL, the lifecycle phase, and the underlying `NSError`
+  domain / code, and MUST NOT trigger retry of already acknowledged
+  bytes. On the `acknowledgedNonEmpty` phase
+  the queue's destructive removal already ran before export cleanup
+  begins; ack is final for the acknowledged non-empty pass. For the
+  acknowledged non-empty pass, the retained scratch artifact is a
+  duplicate copy of the delivered queue payload bytes from the
+  drained export after acknowledgement already completed, not a
+  retry source. Callers MAY remove the retained URL manually after
+  observing
+  `RemoteEngineError.exportCleanupFailed(RemoteEngineExportCleanupContext)`.
+  Every other path (any `.retryable`-exhausted outcome, or any
+  parse / batch / retry-interruption / ack failure after the engine
+  owns a reusable drained batch reference for the current flush
+  pass) keeps the retained export artifact as the retry source.
+  The next flush reuses that retained export artifact through
+  `currentOutstandingBatch()` without parsing or draining a new
+  export artifact.
+  That outstanding-reuse path does not drain new queue bytes from
+  persistence for that flush pass.
+  `.terminal` is sink-decided permanent failure — the classifier
+  owns that judgment — so removing those bytes is forward
+  progress, not data loss; LGR-11 holds because acknowledgement is
+  still the only destructive-removal trigger. Before the first
+  public release tag, the classifier hook moved onto the public
+  `RemoteTransport.classify(_:)` method so adapters own both
+  transport dispatch and delivery classification. For the same
+  adapter implementation and transport result within a flush pass,
+  classification is deterministic for the lifetime of that flush pass.
+  Classification MUST NOT mutate queue acknowledgement state or
+  export-file lifecycle state for the current flush pass. It also
+  MUST NOT cause equivalent mutations indirectly through callbacks,
+  shared state, or transport side effects (LGR-5 / LGR-7 / LGR-9).
+  The public failure taxonomy is `RemoteEngineError`,
+  `RemoteEngineParseError`, `RemoteEngineRetryError`, and
+  `RemoteEngineExportCleanupContext` as public projections of
+  engine-internal diagnostics rather than exposing engine-internal
+  error types directly;
+  the engine-internal `BatchEngineError` and `ExecutionLoopError`
+  types stay engine-internal and are translated by `RemoteEngine`
+  into the public projection taxonomy at the boundary.
+  The engine owns no timer and no platform lifecycle observer
+  (LGR-3, LGR-6); host applications drive integration from their
+  own lifecycle hooks. PR 5/N closes M3.4.
 - **Adapter migrations.** `swift-logger-elastic` migration lands in
   M3.5; HTTP adapters built on this engine ship in M5 outside the
   current milestone scope.

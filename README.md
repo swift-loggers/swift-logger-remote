@@ -15,19 +15,19 @@ successfully drained batch (LGR-11).
 
 ## Status
 
-Pre-release durable remote-delivery engine package. The core
-contract surfaces are locked, the persistence-backed
+Pre-release durable remote-delivery engine package, M3.4 complete.
+The core contract surfaces are locked, the persistence-backed
 ``DurableRemoteQueue`` core is in place, engine-internal
 ``BatchEngine`` machinery recovers entries from a drained queue
 export and splits them into deterministic batches under
-``RemoteBatchPolicy``, and an engine-internal retry / execution
-loop (``RetryExecutor`` / ``ExecutionLoop``) drives the per-entry
-retry budget over the queue + batching + transport primitives
-under ``RemoteRetryPolicy`` without performing the destructive
-acknowledgement-to-removal lifecycle yet. Production
-``RemoteTransport`` adapter integration, flush and lifecycle
-integration, the
-acknowledgement-to-removal lifecycle closure, vendor adapters, and
+``RemoteBatchPolicy``, an engine-internal retry / execution loop
+(``RetryExecutor`` / ``ExecutionLoop``) drives the per-entry retry
+budget under ``RemoteRetryPolicy``, and the public
+``RemoteEngine`` actor wraps that loop with the caller-driven
+``flush()`` surface, the acknowledgement-to-removal lifecycle
+closure for non-empty flush passes, and the
+``RemoteTransport/classify(_:)`` sink-owned classification hook.
+Concrete vendor adapters (Elastic `_bulk`, Splunk HEC, …) and
 tagged releases ship in later milestones.
 
 ## Queue envelope contract
@@ -45,12 +45,15 @@ first release.
 
 ## Non-goals
 
-- No production transport integration yet. The engine-internal
-  retry / execution loop exists and dispatches through the
-  ``RemoteTransport`` abstraction, but this milestone exercises it
-  through a test-only ``StubRemoteTransport`` fixture (not a
-  production adapter); production adapter and network integration
-  lands in a later PR.
+- No autonomous timer or scheduler. The engine is caller-driven:
+  hosts decide when to invoke ``RemoteEngine/flush()`` from their
+  own lifecycle hooks (`UIApplication` background notifications,
+  `NSWorkspace` power-off, shutdown signals, periodic tasks).
+- No concrete vendor adapter (Elastic `_bulk`, Splunk HEC, …) in
+  this package. The engine dispatches through any
+  ``RemoteTransport`` conformer; concrete adapters ship in later
+  milestones. The current test coverage exercises the engine
+  through a test-only ``StubRemoteTransport`` fixture.
 - No vendor-specific encoders, request builders, or response
   validators in the core engine — those live in adapter packages.
 - No Datadog/Splunk/Loki/Dynatrace adapter packages here.
